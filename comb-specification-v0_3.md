@@ -1,9 +1,9 @@
-# Comb: Durable State Substrate for Honeybee, Apiary, Pheromone, and Nectar
+# Comb: Durable State Substrate
 
-**Status:** Draft specification v0.2 (review pass over v0.1)  
-**Date:** 2026-08-22  
+**Status:** Draft specification v0.3 (consumer-requirements pass over v0.2)  
+**Date:** 2026-08-23  
 **Working name:** Comb  
-**Primary systems:** Honeybee, Apiary, Cells, Pheromone, Nectar  
+**Example consumers:** Pheromone, Apiary Cells, Nectar, Flight, Forum, Brood  
 **Audience:** implementers, operators, reviewers, and product owners
 
 ---
@@ -73,6 +73,20 @@ This revision is a review pass over v0.1. It does not change the core commit mec
 - names the sovereign production backend explicitly (§7.10);
 - re-sequences the implementation plan so the hosted beta ships before the portable block overlay (§23.1);
 - closes open questions 26.1.1, 26.1.4, 26.1.6, 26.4.6 and converts 26.3.3 into a measurement gate.
+
+### 0.2 Changes in v0.3
+
+This revision incorporates the requirements of the next wave of planned consumers (work tracking, code review, and database-registry views) and closes the format-level questions that blocked Phase B. It does not change the core commit mechanism. It:
+
+- moves a minimal Comb Log (append, read, follow over a single partition) into the Core foundation phase so the ref journal is real from the start (§7.5a.3, §23.3);
+- restricts the ref journal to logical state changes and excludes journal refs from journaling (§7.5a.3);
+- introduces configurable journal scopes so a namespace can expose one totally ordered stream with cursor semantics (§7.5a.3);
+- specifies that one guarded ref write atomically manages target and lease together, and adds fence preconditions to the Core ref API (§7.5, §7.5a.7);
+- defines the idempotency-record retention window (§18.1);
+- names the authoritative lease time source (§7.6);
+- decides the object envelope, size limits, and chunking defaults (§7.3, §9.3), closing 26.1.2 and 26.1.5;
+- fixes crate ownership: all Comb format and protocol code lives in this repository from day one (§27);
+- adopts a naming policy: application consumers appear in this document only as examples and in mapping sections, never as terms in normative architecture text.
 
 ---
 
@@ -302,6 +316,9 @@ Planned consumers beyond the three initial workloads, each expressible as a view
 | bod (distributed virtual filesystem) | Tree | read-only materialized tree plus an overlay whose commits become new tree generations; Git-shaped, not POSIX-with-`fsync` (§3.4) |
 | gull (gold-standard code storage) | Tree | signed tree publication (§7.5a.4), release manifests (§7.5a.5), retention and legal-hold pins; also the natural object store for a Git forge |
 | Satellites | Cache + compute | a satellite is a Comb Cache node with compute attached; "any authorized node can resolve state and begin lazy materialization" is the satellite model |
+| Flight (work tracking) | Log + refs | one ref per work item carrying the lease; a claim is one guarded write; a fence protects every subsequent write; history is a shared journal scope per tenant (§7.5a.3) |
+| Forum (code review) | Log | one review Log per package; approvals bind to a version digest; landing takes the lease and presents the fence; state is derived, never stored |
+| Brood (database registry) | refs + Log + Volume | registry entries are refs with manifests; leases govern lifecycle; seeds, snapshots, and WAL archives are ordinary artifacts; its ZFS driver is the first consumer of the Volume native-driver contract |
 
 Apiary's distribution story therefore decomposes as: **Comb for state, Pheromone for signal, Council for arbitration.** Comb MUST NOT depend on Pheromone for correctness; Pheromone MAY carry Comb change hints for latency (§7.5a.6).
 
@@ -583,6 +600,13 @@ The exact binary envelope remains an implementation decision, but the following 
 - object creation is create-only;
 - duplicate upload of the same tenant-scoped digest is safe.
 
+**Decided in v0.3 (closes 26.1.2 and 26.1.5).** The canonical envelope is: a fixed binary header (magic, envelope version, flags, metadata length) followed by canonical JSON metadata followed by the payload. A binary metadata encoding is a future envelope version, adopted only if profiling shows JSON decode cost matters. Limits, all format-tagged and revisable by schema version:
+
+- canonical metadata: at most 64 KiB;
+- manifest objects (tree nodes, block maps, log manifests, release manifests): at most 16 MiB;
+- blob objects: SHOULD NOT exceed 64 MiB; larger content uses a chunk-list manifest (§9.3);
+- hard per-object cap: 5 GiB.
+
 ### 7.4 Tenant-scoped keys and deduplication
 
 Content keys MUST include the tenant boundary:
@@ -654,6 +678,14 @@ The provider version token is an implementation mechanism. The logical `generati
 
 The ref schema additionally carries two optional fields defined in §7.5a: `symref` (§7.5a.2) and `signature` (§7.5a.4).
 
+#### Atomic target-and-lease writes and fence preconditions (v0.3)
+
+Because the lease fields (`epoch`, `writer`, `lease_until`) are part of the ref value, **one conditional update atomically advances the target and sets, renews, or clears the lease**. No two-step or sibling-ref protocol exists for acquiring work: a view that needs "take exclusive ownership and record why in the same instant" — a work tracker claiming a task, a review view landing a change — issues exactly one guarded write. Splitting authority across two refs is prohibited because it reintroduces the partial-failure states this design exists to remove.
+
+A guarded write MAY additionally carry a **fence precondition**: the write succeeds only if the caller-supplied epoch equals the ref's live lease epoch. A mismatch fails with `Fenced` and MUST NOT modify the ref. This lets a view require that every protected write — an append to a single-writer Log, a checkpoint, a publication — presents the fence issued at acquisition, and lets external systems that mediate side effects validate a fence against the live ref before acting.
+
+A lease renewal is a conditional update that changes only `lease_until` (and `updated_at`). It does not advance `generation`, is not a logical state change for followers (§8.10), and is not journaled (§7.5a.3).
+
 ### 7.5a Ref conventions
 
 Refs are the extension point of Comb. Every view is a set of conventions over refs, in the same way that Git branches, tags, notes, and worktrees are conventions over Git refs. The following conventions are part of Core from the first format version so that consumers never invent them independently and incompatibly.
@@ -691,15 +723,26 @@ Current and staging generation pointers (§9.7, §11.15) are symbolic refs. Reso
 
 #### 7.5a.3 Ref journal
 
-Every successful ref update appends an entry to a per-resource **ref journal**, which is itself a Comb Log:
+Every successful **logical** ref update appends an entry to a **ref journal**, which is itself a Comb Log:
 
 ```text
-refs/core/journal/<resource-kind>/<resource-id>
+refs/core/journal/<scope>
 ```
 
-An entry records the previous and new `generation`, `epoch`, `target` or `symref`, `writer`, operation ID, and timestamp. This is an operation log in the sense of jujutsu's `jj op log`, and for agents it is the audit trail: "what did this agent's memory ref point to at 14:02" is a journal seek.
+An entry records the ref name, the previous and new `generation`, `epoch`, `target` or `symref`, `writer`, operation ID, and timestamp. This is an operation log in the sense of jujutsu's `jj op log`, and for agents it is the audit trail: "what did this ref point to at 14:02" is a journal seek.
 
-The journal is written *after* the conditional update succeeds. The conditional update remains the sole linearization point; the journal is a consequence, never a prerequisite. A lost journal write therefore degrades auditability but cannot produce an inconsistent ref, and a journal gap is detectable because consecutive entries carry consecutive generations. Journal entries are retained under the resource's retention policy and are members of the GC root set while retained (§19.2). `combctl ref history` reads the journal. This closes open question 26.1.6.
+Two exclusions keep the journal well-founded (v0.3):
+
+1. **Only logical changes are journaled.** A logical change advances `generation`. Lease renewals and other updates that change no logical state are not journaled. Gap detection therefore holds: consecutive journal entries for one ref carry consecutive generations.
+2. **Journal refs are never journaled.** Updates to refs under `refs/core/journal/` do not produce journal entries. Without this rule the journal would recursively record itself.
+
+**Journal scopes (v0.3).** The default scope is one journal per resource (`<scope> = <resource-kind>/<resource-id>`). A view MAY instead declare a **shared journal scope** for a ref-namespace prefix, so that all refs under that prefix report into one journal. A shared scope gives followers what per-resource journals cannot: one totally ordered stream with one cursor across many small resources — the substrate for "what changed since position N", projection catch-up, and snapshot-plus-tail materialization. A view whose resources number in the thousands per tenant (e.g. one ref per work item) needs this; a view with few large resources does not.
+
+Ordering within a shared scope is journal append order. Between updates to *different* refs this is a recording order, not a causal claim — concurrent updates to unrelated refs have no inherent order — and consumers MUST NOT infer cross-ref causality from journal adjacency. Per-ref order within the scope always matches generation order.
+
+The journal is written *after* the conditional update succeeds. The conditional update remains the sole linearization point; the journal is a consequence, never a prerequisite. A lost journal write therefore degrades auditability but cannot produce an inconsistent ref, and a per-ref gap is detectable by generation discontinuity and repairable by re-reading the live ref. Journal entries are retained under the scope's retention policy and are members of the GC root set while retained (§19.2). `combctl ref history` reads the journal. This closes open question 26.1.6.
+
+The journal requires only the minimal Comb Log delivered in Phase B — append, read, and follow over a single partition (§23.3). The full Log feature set (compaction, indexes, retention, partitioning) arrives in Phase C and applies to journals unchanged.
 
 #### 7.5a.4 Signatures
 
@@ -741,8 +784,11 @@ trait RefStore {
     async fn get(&self, name: &RefName) -> Result<RefSnapshot>;
     /// Follows symrefs up to the configured depth.
     async fn resolve(&self, name: &RefName) -> Result<RefSnapshot>;
+    /// Atomically advances target and lease together. `fence`, when supplied,
+    /// requires the caller's epoch to match the live lease epoch (§7.5).
     async fn compare_and_set(&self, name: &RefName, expected: &RefVersion,
-                             next: &RefValue) -> Result<RefSnapshot>;
+                             next: &RefValue, fence: Option<Epoch>)
+        -> Result<RefSnapshot>;
     async fn list(&self, prefix: &RefPrefix, cursor: Option<ListCursor>)
         -> Result<RefPage>;
     async fn history(&self, name: &RefName, from: Option<JournalPos>, max: usize)
@@ -767,6 +813,8 @@ To acquire a writable head:
 A writer MUST include its observed epoch in every ref update. If the ref's epoch changed, the writer is fenced and MUST stop committing.
 
 Clock time is used only to decide when takeover may be attempted. Correctness comes from conditional update and epoch comparison. Clock skew may delay or accelerate an attempt but MUST NOT permit two epochs to commit to the same ref.
+
+**Lease time source (v0.3).** The authoritative time source for lease deadlines is the writing node's own NTP-disciplined clock, padded by the configured clock slack. No coordinated or backend-provided clock is required, because the worst a wrong clock can cause is an early or late takeover attempt — never two concurrent valid writers.
 
 Default provisional values:
 
@@ -1264,7 +1312,7 @@ Large files SHOULD be represented by a chunk-list manifest rather than one monol
 }
 ```
 
-Chunking MAY initially be fixed-size for simplicity. Content-defined chunking MAY be evaluated for large artifacts and Git packs if measurements show meaningful reuse.
+Chunking is fixed-size in v1: files larger than 64 MiB MUST use a chunk-list manifest with 4 MiB chunks (both limits format-tagged; §7.3). Content-defined chunking MAY be evaluated for large artifacts and Git packs if measurements show meaningful reuse.
 
 ### 9.4 Tree refs and publication
 
@@ -2632,6 +2680,8 @@ The operation record SHOULD include:
 
 Reusing an operation ID with a materially different request MUST return an idempotency-conflict error.
 
+**Retention window (v0.3).** Operation records are retained for a configurable window, default **7 days**. Within the window, retrying with the same operation ID returns the original result. After expiry, reuse of the ID returns an explicit unknown-operation error; it MUST NOT silently execute as a new operation.
+
 ### 18.2 Resource identifiers
 
 Identifiers SHOULD use typed opaque forms:
@@ -3261,9 +3311,10 @@ Scope:
 - local, memory, MinIO, and S3 adapters;
 - create-only immutable upload;
 - refs and conditional updates;
-- ref conventions: namespaces, symbolic refs, ref journal, reserved signature field, release manifests (§7.5a);
+- ref conventions: namespaces, symbolic refs, ref journal with scopes, reserved signature field, release manifests (§7.5a);
+- minimal Comb Log — append, read, follow over a single partition — sufficient to back the ref journal (§7.5a.3);
 - tenant-keyed digests (§7.4);
-- leases and epochs;
+- leases and epochs, atomic target-and-lease writes, fence preconditions (§7.5);
 - operation IDs;
 - basic pins;
 - verifier;
@@ -3278,6 +3329,8 @@ Exit criteria:
 - no global manifest exists.
 
 ### 23.4 Phase C — Comb Log / Pheromone ObjectLog
+
+Phase C completes the minimal Log begun in Phase B into the full Comb Log.
 
 Scope:
 
@@ -3532,6 +3585,18 @@ Added in v0.2:
 35. Followers detect change by logical state (`head_seq`, `generation`), never by provider version token alone.
 36. Phase order is A → B → C → D → E → G → F → H.
 
+Added in v0.3:
+
+37. Phase B includes a minimal Comb Log (append, read, follow; single partition); the ref journal is built on it from the start.
+38. The ref journal records only logical state changes; lease renewals and journal refs are never journaled.
+39. Journal scope is configurable: per-resource by default, shared per ref-namespace prefix where a view needs one totally ordered stream with a cursor.
+40. One guarded ref write atomically manages target and lease; fence preconditions are Core API. Sibling-ref claim protocols are prohibited.
+41. Idempotency records are retained 7 days by default; reuse after expiry returns an explicit error, never a silent new operation.
+42. Lease deadlines use the writing node's NTP-disciplined clock plus clock slack; correctness never depends on clocks.
+43. The object envelope is fixed header plus canonical JSON metadata plus payload; manifests are capped at 16 MiB; blobs above 64 MiB are chunked at 4 MiB.
+44. All Comb format and protocol crates live in the Comb repository from day one; consumers depend on them and never define Comb formats locally.
+45. Application consumers appear in this specification only as examples and in mapping sections, never as terms in normative architecture text.
+
 ---
 
 ## 26. Open questions
@@ -3539,10 +3604,10 @@ Added in v0.2:
 ### 26.1 Core format
 
 1. ~~Final default internal digest: BLAKE3-256 versus SHA-256.~~ **Closed in v0.2:** BLAKE3-256 keyed mode (§7.2).
-2. Canonical object-envelope binary format.
+2. ~~Canonical object-envelope binary format.~~ **Closed in v0.3:** fixed header + canonical JSON metadata + payload (§7.3).
 3. Compression defaults by object kind.
 4. ~~Whether refs should include an authenticated signature in addition to object-store authorization and encrypted object integrity.~~ **Closed in v0.2:** field reserved, verification optional (§7.5a.4).
-5. Maximum supported object and manifest sizes.
+5. ~~Maximum supported object and manifest sizes.~~ **Closed in v0.3:** §7.3.
 6. ~~Exact retained ref-history format.~~ **Closed in v0.2:** ref journal as a Comb Log (§7.5a.3).
 
 ### 26.2 Comb Log
@@ -3563,7 +3628,7 @@ Added in v0.2:
 
 ### 26.4 Comb Volume
 
-1. Initial chunk size and cache page size.
+1. Initial chunk size and cache page size. (v0.3: 4 MiB chunks are the working default; cache page size remains open pending measurement.)
 2. Persistent radix-tree fanout and encoding.
 3. `ublk` versus another block-device integration.
 4. Direct I/O and page-cache strategy.
@@ -3679,7 +3744,7 @@ comb/
     filesystems/
 ```
 
-Pheromone MAY initially host some implementation inside its repository, but shared protocol and format code SHOULD move into Comb crates before a second consumer duplicates it.
+All Comb format and protocol code lives in the Comb repository's crates from day one. Consumers — Pheromone included — depend on these crates and MUST NOT define Comb wire or storage formats locally. Phase A's only consumer-repository work is internal restructuring behind existing traits.
 
 ---
 
@@ -3882,6 +3947,7 @@ This specification consolidates three inputs:
 2. **The attached Archil design blog.** This supplies the workload framing of compute, high-performance storage, and object storage; lazy materialization; durability as a configurable write-path parameter; and the observation that the product value includes the managed cache, acknowledgement layer, and compute integration rather than only a file format.
 3. **The Apiary/Honeybee design discussion.** This supplies Comb's name and product boundary; the separation into Log, Tree, and Volume; the concrete Cell storage figures; repository/setup generation lifecycle; native CoW and ext4 fallback strategy; tenant-scoped deduplication; artifact separation; durability profiles; scheduler capability reporting; accounting; and implementation order.
 4. **Review pass, 2026-08-22 (v0.2).** This supplies the Core boundary test and the planned views (session logs, vis, bod, gull, satellites); tenant-keyed digests; the ref conventions; follower change detection by logical state; the Volume gating; the sovereign backend naming; the Nectar and Pheromone v1 mappings; and the re-sequenced plan. Prior art consulted: Git's object/ref split, jujutsu's operation log, Perkeep's blob-and-permanode substrate (as a caution against abstraction drift).
+5. **Consumer-requirements pass, 2026-08-23 (v0.3).** This incorporates the Core requirements surfaced by the Flight PRD v0.1 (atomic target-and-lease writes, fence preconditions, shared journal scopes, idempotency window), the Forum-on-Comb vision v0.1 (lease-and-fence landing, derived state over Logs), and the Brood design v0.2 (registry as refs, ZFS as the first Volume native-driver consumer), and closes the format-level open questions blocking Phase B.
 
 No external vendor claim in this specification should be treated as certified until the corresponding backend or driver passes Comb's own conformance and failure suite.
 
