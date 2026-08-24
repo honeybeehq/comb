@@ -7,8 +7,18 @@ chunks upload create-only and exist logically only once the manifest ref
 advances. This is a durable, multi-reader tail -f over your own MinIO or
 S3 — and the mechanism Pheromone's cloud mode and Flight's journals build on.
 
-Use your MinIO playground (`/tmp/comb-minio`, backend on trmd-metal-1) or
-the S3 one — identical behavior.
+## Setup (once, if you don't have the playground from slice 2)
+
+```sh
+alias combctl=~/Projects/honeybee/comb/repos/comb/target/debug/combctl
+mkdir -p /tmp/comb-minio && cd /tmp/comb-minio
+combctl init --tenant org_trmd --backend s3 \
+  --bucket comb-dev --region eu-north-1 \
+  --profile minio --endpoint http://trmd-metal-1:9000
+```
+
+The S3 playground from slice 1 works identically — the log doesn't care
+which certified backend is underneath.
 
 ## 1. Durable tail -f across processes
 
