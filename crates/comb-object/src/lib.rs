@@ -8,6 +8,7 @@
 
 pub mod backend;
 pub mod conformance;
+pub mod fault;
 pub mod local;
 pub mod memory;
 pub mod s3;

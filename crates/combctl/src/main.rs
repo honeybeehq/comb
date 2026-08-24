@@ -1,14 +1,11 @@
-mod config;
-mod store;
-
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use comb_core::{Digest, DigestKey};
 use comb_object::local::LocalBackend;
 use comb_object::s3::S3Backend;
-use config::{BackendConfig, Config};
+use combctl::config::{self, BackendConfig, Config};
+use combctl::store::{GetSource, Store};
 use std::path::PathBuf;
-use store::{GetSource, Store};
 
 #[derive(Parser)]
 #[command(name = "combctl", about = "Comb durable-state substrate CLI", version)]
@@ -48,6 +45,16 @@ enum Command {
     /// Backend operations
     #[command(subcommand)]
     Backend(BackendCommand),
+    /// Torture the ref protocol with injected faults; verify invariants
+    Chaos {
+        #[arg(long, default_value_t = 2000)]
+        iterations: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Probability of each fault type per backend call
+        #[arg(long, default_value_t = 0.15)]
+        fail_prob: f64,
+    },
     /// Store a file as an immutable blob; prints its digest
     Put { file: PathBuf },
     /// Fetch a blob by digest, verify it, write to stdout or a file
@@ -126,6 +133,28 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     let dir = config::config_dir(cli.dir.as_deref());
 
+    if let Command::Chaos { iterations, seed, fail_prob } = &cli.command {
+        println!(
+            "chaos: {iterations} iterations, seed {seed}, fault probability {fail_prob} per call\n\
+             (in-memory backend; every operation may lose its request or its response)\n"
+        );
+        let report = combctl::chaos::run(*iterations, *seed, *fail_prob, true).await?;
+        println!("\n  operations acked      {}", report.acked);
+        println!("  clean failures        {}  (LeaseHeld / stale CAS — correct rejections)", report.clean_failures);
+        println!("  faults injected       {}", report.injected_faults);
+        println!("  ambiguous acks        {}  (committed but caller saw an error)", report.ambiguous_acks);
+        println!("  invariant violations  {}", report.violations.len());
+        for v in &report.violations {
+            println!("    VIOLATION: {v}");
+        }
+        if report.violations.is_empty() {
+            println!("\nall invariants held. generation and epoch never went backwards,\nno stale fence advanced state, committed state never became unreadable,\njournal chain intact and digest-verified.");
+        } else {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     if let Command::Init { tenant, backend, root, bucket, region, profile, prefix, endpoint } = &cli.command {
         let backend = match backend.as_str() {
             "local" => BackendConfig::Local {
@@ -166,7 +195,7 @@ async fn run(cli: Cli) -> Result<()> {
     let store = Store { backend, tenant: cfg.tenant.clone(), key, cache_dir };
 
     match cli.command {
-        Command::Init { .. } => unreachable!(),
+        Command::Init { .. } | Command::Chaos { .. } => unreachable!(),
         Command::Backend(BackendCommand::Test) => {
             let prefix = format!(
                 "comb/v1/tenants/{}/conformance/{}",
