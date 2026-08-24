@@ -1,0 +1,18 @@
+[package]
+name = "comb-object"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+comb-core = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
