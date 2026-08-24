@@ -3,4 +3,5 @@
 
 pub mod chaos;
 pub mod config;
+pub mod log;
 pub mod store;

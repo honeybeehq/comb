@@ -68,6 +68,9 @@ enum Command {
     /// Ref operations
     #[command(subcommand)]
     Ref(RefCommand),
+    /// Log operations (minimal Comb Log, single partition)
+    #[command(subcommand)]
+    Log(LogCommand),
     /// Acquire a ref's lease; prints the fence (epoch)
     Claim {
         name: String,
@@ -99,6 +102,41 @@ enum Command {
 enum BackendCommand {
     /// Run the conformance suite against the configured backend
     Test,
+}
+
+#[derive(Subcommand)]
+enum LogCommand {
+    /// Append one or more events; acknowledged only after the manifest ref advances
+    Append {
+        name: String,
+        events: Vec<String>,
+        #[arg(long, default_value = "cli")]
+        writer: String,
+        #[arg(long, default_value_t = 60)]
+        lease: i64,
+    },
+    /// Read events in order from a sequence position
+    Read {
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        from: u64,
+    },
+    /// Follow the log live (durable tail -f); Ctrl-C to stop
+    Follow {
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        from: u64,
+        #[arg(long, default_value_t = 500)]
+        poll_ms: u64,
+    },
+    /// Show head sequence, epoch, leader, and chunk count
+    Status { name: String },
+    /// Take over leadership at a new epoch (fences the old leader)
+    Steal {
+        name: String,
+        #[arg(long)]
+        writer: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,6 +330,61 @@ async fn run(cli: Cli) -> Result<()> {
                     e.writer.as_deref().unwrap_or("-"),
                     e.target.as_ref().map(|d| d.to_string()).unwrap_or_else(|| "-".into()),
                 );
+            }
+        }
+        Command::Log(cmd) => {
+            use combctl::log::LogStore;
+            match cmd {
+                LogCommand::Append { name, events, writer, lease } => {
+                    if events.is_empty() {
+                        return Err(anyhow!("nothing to append"));
+                    }
+                    let log = LogStore::new(&store, &name);
+                    let (first, last) = log.append(&writer, &events, lease).await?;
+                    println!("appended seq {first}..{last} ({} events) as {writer}", events.len());
+                }
+                LogCommand::Read { name, from } => {
+                    let log = LogStore::new(&store, &name);
+                    for f in log.read(from).await? {
+                        println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), f.payload);
+                    }
+                }
+                LogCommand::Follow { name, from, poll_ms } => {
+                    let log = LogStore::new(&store, &name);
+                    eprintln!("following {name} from seq {from} (poll {poll_ms}ms, Ctrl-C to stop)");
+                    log.follow(
+                        from,
+                        poll_ms,
+                        |f| println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), f.payload),
+                        || false,
+                    )
+                    .await?;
+                }
+                LogCommand::Status { name } => {
+                    let log = LogStore::new(&store, &name);
+                    match log.status().await? {
+                        None => println!("log {name} does not exist"),
+                        Some((value, manifest)) => {
+                            let leader = value
+                                .lease
+                                .as_ref()
+                                .map(|l| format!("{} (until {})", l.writer, l.lease_until.format("%H:%M:%S")))
+                                .unwrap_or_else(|| "none".into());
+                            println!(
+                                "head_seq {}  epoch {}  chunks {}  leader {}",
+                                manifest.head_seq,
+                                value.epoch,
+                                manifest.chunks.len(),
+                                leader
+                            );
+                        }
+                    }
+                }
+                LogCommand::Steal { name, writer } => {
+                    let log = LogStore::new(&store, &name);
+                    let epoch = log.steal(&writer, 60).await?;
+                    println!("leadership taken by {writer} at epoch {epoch}");
+                }
             }
         }
         Command::Claim { name, writer, ttl, steal } => {
