@@ -22,6 +22,9 @@ pub enum BackendConfig {
         profile: Option<String>,
         #[serde(default = "default_prefix")]
         prefix: String,
+        /// S3-compatible endpoint URL (MinIO etc.); AWS when absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
     },
 }
 

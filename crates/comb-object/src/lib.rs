@@ -7,6 +7,7 @@
 //! evidence of equivalent semantics (§7.9).
 
 pub mod backend;
+pub mod conformance;
 pub mod local;
 pub mod memory;
 pub mod s3;

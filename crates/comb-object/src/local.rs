@@ -131,6 +131,14 @@ impl ObjectBackend for LocalBackend {
     async fn exists(&self, key: &str) -> Result<bool> {
         Ok(self.path_for(key)?.exists())
     }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        match fs::remove_file(self.path_for(key)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[cfg(test)]

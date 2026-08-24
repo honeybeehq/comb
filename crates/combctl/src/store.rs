@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// High-level store: envelopes over an object backend, a read-through
 /// verified cache, refs with lease/fence semantics, and the ref journal.
 pub struct Store {
-    pub backend: Box<dyn ObjectBackend>,
+    pub backend: std::sync::Arc<dyn ObjectBackend>,
     pub tenant: String,
     pub key: DigestKey,
     /// Node-local verified object cache (spec §15). `None` disables it

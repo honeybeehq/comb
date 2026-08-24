@@ -61,4 +61,9 @@ impl ObjectBackend for MemoryBackend {
     async fn exists(&self, key: &str) -> Result<bool> {
         Ok(self.state.lock().unwrap().contains_key(key))
     }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.state.lock().unwrap().remove(key);
+        Ok(())
+    }
 }

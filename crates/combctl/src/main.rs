@@ -41,7 +41,13 @@ enum Command {
         profile: Option<String>,
         #[arg(long, default_value = "comb")]
         prefix: String,
+        /// S3-compatible endpoint URL (MinIO etc.)
+        #[arg(long)]
+        endpoint: Option<String>,
     },
+    /// Backend operations
+    #[command(subcommand)]
+    Backend(BackendCommand),
     /// Store a file as an immutable blob; prints its digest
     Put { file: PathBuf },
     /// Fetch a blob by digest, verify it, write to stdout or a file
@@ -83,6 +89,12 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum BackendCommand {
+    /// Run the conformance suite against the configured backend
+    Test,
+}
+
+#[derive(Subcommand)]
 enum RefCommand {
     /// Show a ref
     Get { name: String },
@@ -114,7 +126,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     let dir = config::config_dir(cli.dir.as_deref());
 
-    if let Command::Init { tenant, backend, root, bucket, region, profile, prefix } = &cli.command {
+    if let Command::Init { tenant, backend, root, bucket, region, profile, prefix, endpoint } = &cli.command {
         let backend = match backend.as_str() {
             "local" => BackendConfig::Local {
                 root: root.clone().ok_or_else(|| anyhow!("--root is required for local backend"))?,
@@ -124,6 +136,7 @@ async fn run(cli: Cli) -> Result<()> {
                 region: region.clone().ok_or_else(|| anyhow!("--region is required for s3 backend"))?,
                 profile: profile.clone(),
                 prefix: prefix.clone(),
+                endpoint: endpoint.clone(),
             },
             other => return Err(anyhow!("unknown backend kind: {other}")),
         };
@@ -141,10 +154,12 @@ async fn run(cli: Cli) -> Result<()> {
 
     let cfg = config::load(&dir)?;
     let key = DigestKey::from_hex(&cfg.digest_key)?;
-    let (backend, cache_dir): (Box<dyn comb_object::ObjectBackend>, Option<PathBuf>) = match &cfg.backend {
-        BackendConfig::Local { root } => (Box::new(LocalBackend::new(root)), None),
-        BackendConfig::S3 { bucket, region, profile, prefix } => (
-            Box::new(S3Backend::connect(profile.as_deref(), Some(region), bucket, prefix).await),
+    let (backend, cache_dir): (std::sync::Arc<dyn comb_object::ObjectBackend>, Option<PathBuf>) = match &cfg.backend {
+        BackendConfig::Local { root } => (std::sync::Arc::new(LocalBackend::new(root)), None),
+        BackendConfig::S3 { bucket, region, profile, prefix, endpoint } => (
+            std::sync::Arc::new(
+                S3Backend::connect(profile.as_deref(), Some(region), bucket, prefix, endpoint.as_deref()).await,
+            ),
             Some(dir.join("cache")),
         ),
     };
@@ -152,6 +167,35 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Init { .. } => unreachable!(),
+        Command::Backend(BackendCommand::Test) => {
+            let prefix = format!(
+                "comb/v1/tenants/{}/conformance/{}",
+                store.tenant,
+                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+            );
+            println!("running conformance suite (key prefix {prefix})...\n");
+            let results = comb_object::conformance::run(store.backend.clone(), &prefix).await;
+            let mut failed = 0;
+            for r in &results {
+                println!(
+                    "  {}  {:<45} {}",
+                    if r.passed { "PASS" } else { "FAIL" },
+                    r.name,
+                    if r.passed { String::new() } else { r.detail.clone() }
+                );
+                if !r.passed {
+                    failed += 1;
+                }
+            }
+            println!();
+            if failed == 0 {
+                println!("backend CONFORMS ({} checks)", results.len());
+            } else {
+                println!("backend DOES NOT CONFORM: {failed}/{} checks failed", results.len());
+                println!("this backend MUST NOT be used as an authoritative Comb backend");
+                std::process::exit(2);
+            }
+        }
         Command::Put { file } => {
             let bytes = std::fs::read(&file)?;
             let size = bytes.len();

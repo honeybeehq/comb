@@ -15,7 +15,15 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
-    pub async fn connect(profile: Option<&str>, region: Option<&str>, bucket: &str, prefix: &str) -> Self {
+    /// `endpoint` selects an S3-compatible server (e.g. MinIO); path-style
+    /// addressing is forced there because virtual-host style needs DNS.
+    pub async fn connect(
+        profile: Option<&str>,
+        region: Option<&str>,
+        bucket: &str,
+        prefix: &str,
+        endpoint: Option<&str>,
+    ) -> Self {
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if let Some(p) = profile {
             loader = loader.profile_name(p);
@@ -24,8 +32,12 @@ impl S3Backend {
             loader = loader.region(aws_config::Region::new(r.to_string()));
         }
         let conf = loader.load().await;
+        let mut builder = aws_sdk_s3::config::Builder::from(&conf);
+        if let Some(url) = endpoint {
+            builder = builder.endpoint_url(url).force_path_style(true);
+        }
         S3Backend {
-            client: Client::new(&conf),
+            client: Client::from_conf(builder.build()),
             bucket: bucket.to_string(),
             prefix: prefix.trim_matches('/').to_string(),
         }
@@ -142,5 +154,16 @@ impl ObjectBackend for S3Backend {
                 }
             }
         }
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(self.full_key(key))
+            .send()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("s3 delete {key}: {e:?}")))?;
+        Ok(())
     }
 }

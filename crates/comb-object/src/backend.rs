@@ -20,4 +20,7 @@ pub trait ObjectBackend: Send + Sync {
     async fn get(&self, key: &str) -> Result<(Vec<u8>, Version)>;
 
     async fn exists(&self, key: &str) -> Result<bool>;
+
+    /// Delete an object. Deleting a missing key is not an error.
+    async fn delete(&self, key: &str) -> Result<()>;
 }
