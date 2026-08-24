@@ -71,16 +71,22 @@ drill L3).*
 
 ## 3. Kill an append mid-flight
 
+Appends are usually too fast to kill by hand, so hold the dangerous window
+open deliberately — the pause sits exactly between chunk upload and
+manifest publication:
+
 ```sh
 combctl log status chat            # note head_seq
-combctl log append chat "doomed" --writer metal & sleep 0.15; kill -9 %1
-combctl log status chat            # head_seq unchanged (or +1 if it won the race)
-combctl log read chat --from 1     # contiguous sequences, no gap, no duplicate
+COMB_PAUSE_BEFORE_PUBLISH_MS=3000 combctl log append chat "doomed" --writer metal &
+sleep 1; kill -9 %1
+combctl log status chat            # head_seq UNCHANGED — no ack was given
+combctl log read chat --from 1     # "doomed" is nowhere; sequences contiguous
 ```
 
-If the kill landed before manifest publication, the uploaded chunk is an
-invisible orphan (a later GC slice sweeps those); if after, the append
-simply committed. Either way: no gap, no torn state, no false ack.
+The chunk was already uploaded when you killed it, but it is logically
+nonexistent: nothing references it (a later GC slice sweeps such orphans).
+Without the env var the append usually wins the race and simply commits —
+also correct: no gap, no torn state, no false ack, ever.
 
 *Proves: a chunk not referenced by a committed manifest is logically
 nonexistent (§8.7, drill L1).*

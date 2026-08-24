@@ -122,6 +122,16 @@ impl<'a> LogStore<'a> {
             });
             let (manifest_digest, _) = self.store.put_blob(serde_json::to_vec(&manifest)?).await?;
 
+            // Debug knob for the L1 kill demo: hold the window between
+            // upload and publication open so a human can kill the process
+            // inside it. Chunk and manifest are then invisible orphans.
+            if let Ok(ms) = std::env::var("COMB_PAUSE_BEFORE_PUBLISH_MS") {
+                if let Ok(ms) = ms.parse::<u64>() {
+                    eprintln!("(paused {ms}ms before manifest publication — kill me now to orphan the chunk)");
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                }
+            }
+
             // 3. One guarded write advances head and lease together.
             let mut next = current.clone();
             next.generation += 1;
