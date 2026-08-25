@@ -1,4 +1,4 @@
-use crate::backend::{ObjectBackend, Version};
+use crate::backend::{ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use comb_core::error::{CoreError, Result};
 use std::fs;
@@ -138,6 +138,43 @@ impl ObjectBackend for LocalBackend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
+        let mut out = Vec::new();
+        let mut stack = vec![self.root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(".tmp-") || name.starts_with(".lock-") {
+                    continue;
+                }
+                let key = path
+                    .strip_prefix(&self.root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !key.starts_with(prefix) {
+                    continue;
+                }
+                let modified: chrono::DateTime<chrono::Utc> =
+                    entry.metadata()?.modified()?.into();
+                out.push(ObjectInfo { key, modified });
+            }
+        }
+        Ok(out)
     }
 }
 

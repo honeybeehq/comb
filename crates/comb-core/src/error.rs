@@ -25,6 +25,9 @@ pub enum CoreError {
     #[error("integrity error: {0}")]
     IntegrityError(String),
 
+    #[error("trimmed: position is below the retention floor; resume at {resume_at}")]
+    Trimmed { resume_at: u64 },
+
     #[error("invalid format: {0}")]
     InvalidFormat(String),
 

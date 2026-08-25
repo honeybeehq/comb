@@ -1,5 +1,6 @@
-use crate::backend::{ObjectBackend, Version};
+use crate::backend::{ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use comb_core::error::{CoreError, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -7,7 +8,7 @@ use std::sync::Mutex;
 /// In-memory backend for tests (spec §7.10). Version tokens are counters.
 #[derive(Default)]
 pub struct MemoryBackend {
-    state: Mutex<HashMap<String, (Vec<u8>, u64)>>,
+    state: Mutex<HashMap<String, (Vec<u8>, u64, DateTime<Utc>)>>,
 }
 
 impl MemoryBackend {
@@ -23,7 +24,7 @@ impl ObjectBackend for MemoryBackend {
         if state.contains_key(key) {
             return Err(CoreError::AlreadyExists(key.into()));
         }
-        state.insert(key.into(), (body.to_vec(), 1));
+        state.insert(key.into(), (body.to_vec(), 1, Utc::now()));
         Ok(Version("1".into()))
     }
 
@@ -31,12 +32,12 @@ impl ObjectBackend for MemoryBackend {
         let mut state = self.state.lock().unwrap();
         match (state.get(key), expected) {
             (None, None) => {
-                state.insert(key.into(), (body.to_vec(), 1));
+                state.insert(key.into(), (body.to_vec(), 1, Utc::now()));
                 Ok(Version("1".into()))
             }
             (None, Some(_)) => Err(CoreError::PreconditionFailed(format!("{key}: gone"))),
             (Some(_), None) => Err(CoreError::AlreadyExists(key.into())),
-            (Some((_, v)), Some(exp)) => {
+            (Some((_, v, _)), Some(exp)) => {
                 if exp.0 != v.to_string() {
                     return Err(CoreError::PreconditionFailed(format!(
                         "{key}: expected version {}, live {v}",
@@ -44,7 +45,7 @@ impl ObjectBackend for MemoryBackend {
                     )));
                 }
                 let next = v + 1;
-                state.insert(key.into(), (body.to_vec(), next));
+                state.insert(key.into(), (body.to_vec(), next, Utc::now()));
                 Ok(Version(next.to_string()))
             }
         }
@@ -54,7 +55,7 @@ impl ObjectBackend for MemoryBackend {
         let state = self.state.lock().unwrap();
         state
             .get(key)
-            .map(|(b, v)| (b.clone(), Version(v.to_string())))
+            .map(|(b, v, _)| (b.clone(), Version(v.to_string())))
             .ok_or_else(|| CoreError::NotFound(key.into()))
     }
 
@@ -65,5 +66,16 @@ impl ObjectBackend for MemoryBackend {
     async fn delete(&self, key: &str) -> Result<()> {
         self.state.lock().unwrap().remove(key);
         Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, (_, _, at))| ObjectInfo { key: k.clone(), modified: *at })
+            .collect())
     }
 }

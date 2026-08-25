@@ -1,4 +1,4 @@
-use crate::backend::{ObjectBackend, Version};
+use crate::backend::{ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
@@ -165,5 +165,40 @@ impl ObjectBackend for S3Backend {
             .await
             .map_err(|e| CoreError::BackendUnavailable(format!("s3 delete {key}: {e:?}")))?;
         Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
+        let full_prefix = self.full_key(prefix);
+        let strip = if self.prefix.is_empty() { String::new() } else { format!("{}/", self.prefix) };
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&full_prefix);
+            if let Some(t) = &token {
+                req = req.continuation_token(t);
+            }
+            let page = req
+                .send()
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(format!("s3 list {prefix}: {e:?}")))?;
+            for obj in page.contents() {
+                let Some(key) = obj.key() else { continue };
+                let key = key.strip_prefix(&strip).unwrap_or(key).to_string();
+                let modified = obj
+                    .last_modified()
+                    .and_then(|t| chrono::DateTime::from_timestamp(t.secs(), 0))
+                    .unwrap_or_else(chrono::Utc::now);
+                out.push(ObjectInfo { key, modified });
+            }
+            match page.next_continuation_token() {
+                Some(t) => token = Some(t.to_string()),
+                None => break,
+            }
+        }
+        Ok(out)
     }
 }

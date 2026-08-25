@@ -45,6 +45,14 @@ enum Command {
     /// Backend operations
     #[command(subcommand)]
     Backend(BackendCommand),
+    /// Reachability sweep: delete unreachable objects past the grace window
+    Sweep {
+        #[arg(long, default_value_t = 60)]
+        grace_mins: i64,
+        /// Actually delete (default is dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
     /// Torture the ref protocol with injected faults; verify invariants
     Chaos {
         #[arg(long, default_value_t = 2000)]
@@ -136,6 +144,26 @@ enum LogCommand {
         name: String,
         #[arg(long)]
         writer: String,
+    },
+    /// Merge WAL chunks into a segment (representation only, contents unchanged)
+    Compact { name: String },
+    /// Advance the retention floor; readers below it get Trimmed{resume_at}
+    Trim {
+        name: String,
+        #[arg(long)]
+        before: u64,
+    },
+    /// Throughput benchmark through the group-commit writer
+    Bench {
+        name: String,
+        #[arg(long, default_value_t = 2000)]
+        events: usize,
+        #[arg(long, default_value_t = 8)]
+        producers: usize,
+        #[arg(long, default_value_t = 64)]
+        payload_bytes: usize,
+        #[arg(long, default_value_t = 10)]
+        window_ms: u64,
     },
 }
 
@@ -385,6 +413,84 @@ async fn run(cli: Cli) -> Result<()> {
                     let epoch = log.steal(&writer, 60).await?;
                     println!("leadership taken by {writer} at epoch {epoch}");
                 }
+                LogCommand::Compact { name } => {
+                    let log = LogStore::new(&store, &name);
+                    let merged = log.compact().await?;
+                    if merged == 0 {
+                        println!("nothing to compact (fewer than 2 WAL chunks)");
+                    } else {
+                        println!("compacted {merged} chunks into 1 segment; contents unchanged; old chunks are now orphans");
+                    }
+                }
+                LogCommand::Trim { name, before } => {
+                    let log = LogStore::new(&store, &name);
+                    let floor = log.trim_before(before).await?;
+                    println!("retention floor is now {floor}; reads resume at {}", floor + 1);
+                }
+                LogCommand::Bench { name, events, producers, payload_bytes, window_ms } => {
+                    use combctl::log::GroupWriter;
+                    let payload = "x".repeat(payload_bytes);
+                    let (writer, task) =
+                        GroupWriter::spawn(store.clone(), &name, "bench".into(), window_ms, 2000);
+                    let writer = std::sync::Arc::new(writer);
+                    let per = events / producers;
+                    println!(
+                        "bench: {events} events, {producers} producers, {payload_bytes}B payloads, {window_ms}ms commit window"
+                    );
+                    let start = std::time::Instant::now();
+                    let mut tasks = Vec::new();
+                    for _ in 0..producers {
+                        let writer = writer.clone();
+                        let payload = payload.clone();
+                        tasks.push(tokio::spawn(async move {
+                            let mut latencies = Vec::with_capacity(per);
+                            for _ in 0..per {
+                                let t0 = std::time::Instant::now();
+                                writer.submit(vec![payload.clone()]).await.unwrap();
+                                latencies.push(t0.elapsed());
+                            }
+                            latencies
+                        }));
+                    }
+                    let mut latencies = Vec::new();
+                    for t in tasks {
+                        latencies.extend(t.await?);
+                    }
+                    let wall = start.elapsed();
+                    drop(writer);
+                    let stats = task.await?;
+                    latencies.sort();
+                    let p = |q: f64| latencies[((latencies.len() - 1) as f64 * q) as usize];
+                    println!("\n  wall time        {:.2}s", wall.as_secs_f64());
+                    println!("  events acked     {}", stats.events);
+                    println!("  events/sec       {:.0}", stats.events as f64 / wall.as_secs_f64());
+                    println!("  commits (CAS)    {}  (avg batch {:.1} events)", stats.commits, stats.events as f64 / stats.commits.max(1) as f64);
+                    println!("  CAS conflicts    {}", stats.conflicts);
+                    println!("  ack latency p50  {:.0}ms", p(0.5).as_millis());
+                    println!("  ack latency p99  {:.0}ms", p(0.99).as_millis());
+                }
+            }
+        }
+        Command::Sweep { grace_mins, yes } => {
+            let report = combctl::sweep::sweep(&store, grace_mins, yes).await?;
+            println!(
+                "refs {}  objects {}  reachable {}  in-grace {}  candidates {}",
+                report.refs_scanned,
+                report.objects_scanned,
+                report.reachable,
+                report.in_grace,
+                report.candidates.len()
+            );
+            for key in report.candidates.iter().take(20) {
+                println!("  orphan: ...{}", &key[key.len().saturating_sub(24)..]);
+            }
+            if report.candidates.len() > 20 {
+                println!("  ... and {} more", report.candidates.len() - 20);
+            }
+            if yes {
+                println!("deleted {} objects", report.deleted);
+            } else if !report.candidates.is_empty() {
+                println!("dry-run: pass --yes to delete");
             }
         }
         Command::Claim { name, writer, ttl, steal } => {

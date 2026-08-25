@@ -9,7 +9,7 @@
 //!
 //! Injection is driven by a seeded RNG so every chaos run is reproducible.
 
-use crate::backend::{ObjectBackend, Version};
+use crate::backend::{ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use comb_core::error::{CoreError, Result};
 use rand::rngs::StdRng;
@@ -102,5 +102,12 @@ impl ObjectBackend for FaultBackend {
             return Err(self.lost_response("delete"));
         }
         Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
+        if self.roll(self.fail_before) {
+            return Err(self.lost_request("list"));
+        }
+        self.inner.list(prefix).await
     }
 }

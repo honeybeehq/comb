@@ -6,6 +6,14 @@ use comb_core::error::Result;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub String);
 
+/// Listing entry. Listing is for discovery, orphan scanning, and GC only —
+/// never a linearization mechanism (spec §7.8).
+#[derive(Debug, Clone)]
+pub struct ObjectInfo {
+    pub key: String,
+    pub modified: chrono::DateTime<chrono::Utc>,
+}
+
 #[async_trait]
 pub trait ObjectBackend: Send + Sync {
     /// Create-only write. Fails with `AlreadyExists` if the key exists.
@@ -23,4 +31,7 @@ pub trait ObjectBackend: Send + Sync {
 
     /// Delete an object. Deleting a missing key is not an error.
     async fn delete(&self, key: &str) -> Result<()>;
+
+    /// List keys under a prefix. Discovery only; may be stale (spec §7.8).
+    async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>>;
 }

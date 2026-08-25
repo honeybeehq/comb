@@ -785,8 +785,10 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "blake3",
+ "chrono",
  "comb-core",
  "hex",
+ "rand",
  "tempfile",
  "tokio",
 ]

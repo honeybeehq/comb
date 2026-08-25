@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 /// High-level store: envelopes over an object backend, a read-through
 /// verified cache, refs with lease/fence semantics, and the ref journal.
+#[derive(Clone)]
 pub struct Store {
     pub backend: std::sync::Arc<dyn ObjectBackend>,
     pub tenant: String,
