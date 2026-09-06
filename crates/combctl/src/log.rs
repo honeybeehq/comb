@@ -469,6 +469,13 @@ impl<'a> LogStore<'a> {
         match domain.stable_index {
             Some(root) => {
                 root.validate()?;
+                hamt::check_root_against_head(
+                    &root,
+                    IndexHead {
+                        generation: snapshot.value.generation,
+                        head_seq: domain.head_seq,
+                    },
+                )?;
                 Ok(root)
             }
             None => Err(CoreError::IntegrityError(
