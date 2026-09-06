@@ -25,3 +25,7 @@ The original failure artifact identifies an `open_path(...).unwrap()` call, not 
 The two parent regressions run in a private archive and build directory. They use the implementation's existing timer persistence failpoint. No shared daemon or user Pheromone home is used. Test command: `cargo test -p pher --offline review_ -- --test-threads=1`.
 
 Both failures reproduced in 0.50 seconds after compilation. The follower cursor advanced from 1 to 2 after injected timer persistence failure. A disarm retry returned success while the cancelled timer remained on disk. Full output is in [the captured output](../implementation/reliable-log/verification/pher-timer-regressions.txt).
+
+## Disposition at 535e574
+
+Startup implementation now matches verified `de71087`, apart from corrected comments. That correction is accepted. `daemon.rs` is byte-identical to `5bda039`, so neither reproduced timer defect was changed. The two timer regressions remain acceptance blockers. The owner has the executable test snippet and captured failures.
