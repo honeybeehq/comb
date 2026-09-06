@@ -24,8 +24,19 @@ use std::num::NonZeroU64;
 pub const NS_V2: &str = "comb/v2";
 pub const NS_V3: &str = "comb/v3";
 pub const NS_V1: &str = "comb/v1";
-const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
-const LOG_MANIFEST_SCHEMA_V3: &str = "comb.log.partition-manifest/v3";
+pub(crate) const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
+pub(crate) const LOG_MANIFEST_SCHEMA_V3: &str = "comb.log.partition-manifest/v3";
+pub(crate) const LOG_MANIFEST_CARRIERS: &[&str] = &[LOG_MANIFEST_SCHEMA, LOG_MANIFEST_SCHEMA_V3];
+/// v2 manifests grow inline and are published through `attempt` with no
+/// write-side cap. Read cap must stay large enough for those live objects.
+/// v3 manifests are catalog-backed and stay at `MAX_MANIFEST_OBJECT_BYTES`.
+pub(crate) const MAX_V2_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
+const COMMIT_VIEW_ENVELOPES: &[&str] = &[
+    COMMIT_SCHEMA,
+    LOG_MANIFEST_SCHEMA,
+    LOG_MANIFEST_SCHEMA_V3,
+    "comb.object/v1",
+];
 const MAX_PUBLISH_ATTEMPTS: u32 = 128;
 const MAX_SEEK_HOPS: u32 = 10_000;
 
@@ -545,7 +556,14 @@ impl Store {
         &self,
         identity: &OpIdentity,
     ) -> Result<Option<(OpIntent, Option<Version>)>> {
-        match self.backend.get(&self.intent_key(identity)).await {
+        match self
+            .backend
+            .get_limited(
+                &self.intent_key(identity),
+                NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero"),
+            )
+            .await
+        {
             Ok((bytes, version)) => {
                 let intent: OpIntent = serde_json::from_slice(&bytes).map_err(|e| {
                     CoreError::RecoveryFailed(format!(
@@ -962,7 +980,7 @@ impl Store {
                 &self.key,
             );
             let bytes = env.encode()?;
-            let cap = encoded_upload_cap(&u.schema);
+            let cap = encoded_object_cap(&u.schema);
             if bytes.len() as u64 > cap {
                 return Err(CoreError::ObjectTooLarge {
                     key: self.object_key(&env.meta.digest),
@@ -1007,7 +1025,7 @@ impl Store {
                 &self.key,
             );
             let bytes = env.encode()?;
-            let cap = encoded_upload_cap(COMMIT_SCHEMA);
+            let cap = encoded_object_cap(COMMIT_SCHEMA);
             if bytes.len() as u64 > cap {
                 return Err(CoreError::ObjectTooLarge {
                     key: self.object_key(&env.meta.digest),
@@ -1173,18 +1191,12 @@ impl Store {
     }
 
     pub(crate) async fn load_commit_view(&self, digest: &Digest) -> Result<CommitView> {
-        const CARRIERS: &[&str] = &[
-            COMMIT_SCHEMA,
-            LOG_MANIFEST_SCHEMA,
-            LOG_MANIFEST_SCHEMA_V3,
-            "comb.object/v1",
-        ];
         let spec = EnvelopeReadSpec {
             tenant: &self.tenant,
             kind: ObjectKind::Blob,
-            allowed_schemas: CARRIERS,
-            max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
-            max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+            allowed_schemas: COMMIT_VIEW_ENVELOPES,
+            max_encoded_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+            max_plaintext_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
         };
         let (payload, _) = self
             .get_blob_limited(digest, spec)
@@ -1209,10 +1221,19 @@ impl Store {
                 target_follows_commit: false,
             });
         }
-        if schema != LOG_MANIFEST_SCHEMA && schema != LOG_MANIFEST_SCHEMA_V3 {
+        if !LOG_MANIFEST_CARRIERS.contains(&schema) {
             return Err(CoreError::RecoveryFailed(format!(
                 "object {digest} has unknown commit schema {schema}"
             ))
+            .into());
+        }
+        let cap = encoded_object_cap(schema);
+        if payload.len() as u64 > cap {
+            return Err(CoreError::ObjectTooLarge {
+                key: self.object_key(digest),
+                limit: cap,
+                actual: Some(payload.len() as u64),
+            }
             .into());
         }
         let header_v = value.get("header").cloned().ok_or_else(|| {
@@ -1541,9 +1562,10 @@ fn intent_expiry(identity: &OpIdentity, policy: &OperationPolicy) -> Option<Date
 
 const MAX_CHUNK_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
 
-fn encoded_upload_cap(schema: &str) -> u64 {
-    if schema == LOG_MANIFEST_SCHEMA
-        || schema == LOG_MANIFEST_SCHEMA_V3
+pub(crate) fn encoded_object_cap(schema: &str) -> u64 {
+    if schema == LOG_MANIFEST_SCHEMA {
+        MAX_V2_MANIFEST_OBJECT_BYTES
+    } else if LOG_MANIFEST_CARRIERS.contains(&schema)
         || schema == COMMIT_SCHEMA
         || schema == HEADER_SCHEMA
     {
@@ -1563,7 +1585,7 @@ fn require_v3_field<'a>(
     })
 }
 
-fn map_commit_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
+pub(crate) fn map_commit_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
     match e.downcast::<CoreError>() {
         Ok(CoreError::BackendUnavailable(m)) => {
             CoreError::BackendUnavailable(format!("commit {digest}: {m}")).into()
@@ -1870,6 +1892,90 @@ mod tests {
                 Some(CoreError::IntegrityError(m)) if m.contains("admitted")
             ),
             "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_manifest_above_v3_cap_stays_readable() {
+        let store = store();
+        let op = store.mint_operation();
+        let header = CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "log/big/p0".into(),
+            generation: 1,
+            epoch: 0,
+            identity: op.to_string(),
+            request: store.key.digest(b"req"),
+            parent: None,
+            skip: None,
+            at: chrono::Utc::now(),
+        };
+        header.validate().unwrap();
+        let mut value = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA,
+            "header": header,
+            "log": "log/big/p0",
+            "epoch": 0,
+            "head_seq": 0,
+            "chunks": [],
+            "retention": "complete",
+        });
+        value["pad"] = serde_json::Value::String("x".repeat(600 * 1024));
+        let encoded = serde_json::to_vec(&value).unwrap();
+        assert!(encoded.len() as u64 > comb_core::MAX_MANIFEST_OBJECT_BYTES);
+        assert!(encoded.len() as u64 <= MAX_V2_MANIFEST_OBJECT_BYTES);
+        let (digest, _) = store.put_blob(encoded).await.unwrap();
+        let view = store.load_commit_view(&digest).await.unwrap();
+        assert_eq!(view.header.resource, "log/big/p0");
+
+        let mut v3 = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA_V3,
+            "header": header,
+            "log": "log/big/p0",
+            "epoch": 0,
+            "head_seq": 0,
+            "admitted": [],
+            "stable_admissions": [],
+            "result": null,
+            "ref_state": {
+                "schema": RefValue::SCHEMA,
+                "tenant": "org_t",
+                "name": "log/big/p0",
+                "generation": 1,
+                "epoch": 0,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            },
+        });
+        v3["pad"] = serde_json::Value::String("x".repeat(600 * 1024));
+        let env = Envelope::new(
+            &store.tenant,
+            ObjectKind::Blob,
+            LOG_MANIFEST_SCHEMA_V3,
+            serde_json::to_vec(&v3).unwrap(),
+            &store.key,
+        );
+        let bytes = env.encode().unwrap();
+        store
+            .backend
+            .put_create(&store.object_key(&env.meta.digest), &bytes)
+            .await
+            .unwrap();
+        let err = store.load_commit_view(&env.meta.digest).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::ObjectTooLarge { limit, .. })
+                    if *limit == comb_core::MAX_MANIFEST_OBJECT_BYTES
+            ),
+            "{err:#}"
+        );
+        assert_eq!(
+            encoded_object_cap(LOG_MANIFEST_SCHEMA),
+            MAX_V2_MANIFEST_OBJECT_BYTES
+        );
+        assert_eq!(
+            encoded_object_cap(LOG_MANIFEST_SCHEMA_V3),
+            comb_core::MAX_MANIFEST_OBJECT_BYTES
         );
     }
 }

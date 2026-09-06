@@ -146,6 +146,12 @@ fn validate_children(children: &[CatalogChild], height: u8) -> Result<()> {
 }
 
 async fn put_node(store: &Store, node: &CatalogNode) -> Result<Digest> {
+    match node {
+        CatalogNode::Leaf { refs, .. } => validate_leaf_refs(refs)?,
+        CatalogNode::Branch {
+            height, children, ..
+        } => validate_children(children, *height)?,
+    }
     let payload = serde_json::to_vec(node)?;
     store
         .put_object(
@@ -802,5 +808,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn put_node_rejects_structurally_invalid_leaf() {
+        let store = store();
+        let err = put_node(
+            &store,
+            &CatalogNode::Leaf {
+                schema: CatalogSchemaV1::V1,
+                refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(_))
+            ),
+            "{err:#}"
+        );
     }
 }

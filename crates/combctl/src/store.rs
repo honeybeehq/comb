@@ -1,4 +1,7 @@
-use crate::publish::{HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan};
+use crate::publish::{
+    map_commit_read_error, HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan,
+    LOG_MANIFEST_CARRIERS, MAX_V2_MANIFEST_OBJECT_BYTES,
+};
 use anyhow::Result;
 use comb_core::error::CoreError;
 use comb_core::operation::{
@@ -6,7 +9,6 @@ use comb_core::operation::{
 };
 use comb_core::{
     Digest, DigestKey, Envelope, EnvelopeFormatField, EnvelopeReadSpec, ObjectKind, RefValue,
-    MAX_MANIFEST_OBJECT_BYTES,
 };
 use comb_object::{ObjectBackend, Version};
 use serde::{Deserialize, Serialize};
@@ -448,16 +450,12 @@ async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Resu
     let Some(digest) = current.target.as_ref() else {
         return Ok(());
     };
-    const LOG_MANIFESTS: &[&str] = &[
-        "comb.log.partition-manifest/v2",
-        "comb.log.partition-manifest/v3",
-    ];
     let spec = EnvelopeReadSpec {
         tenant: &store.tenant,
         kind: ObjectKind::Blob,
-        allowed_schemas: LOG_MANIFESTS,
-        max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
-        max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+        allowed_schemas: LOG_MANIFEST_CARRIERS,
+        max_encoded_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+        max_plaintext_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
     };
     let (payload, _) = match store.get_blob_limited(digest, spec).await {
         Ok(v) => v,
@@ -469,19 +467,14 @@ async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Resu
             {
                 return Ok(());
             }
-            return Err(CoreError::Rejected(format!(
-                "core set-target cannot overwrite a ref whose target {digest} cannot be read: {e:#}"
-            ))
-            .into());
+            return Err(map_commit_read_error(digest, e));
         }
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
         return Ok(());
     };
-    let schema = value.get("schema").and_then(|s| s.as_str());
-    if schema == Some("comb.log.partition-manifest/v2")
-        || schema == Some("comb.log.partition-manifest/v3")
-    {
+    let schema = value.get("schema").and_then(|s| s.as_str()).unwrap_or("");
+    if LOG_MANIFEST_CARRIERS.contains(&schema) {
         return Err(
             CoreError::Rejected("core set-target cannot overwrite a log-owned ref".into()).into(),
         );
@@ -984,5 +977,63 @@ mod limited_reads {
             v3.intent_key(&OpIdentity::Generic(op))
         );
         assert_ne!(v2.cache_path(&digest), v3.cache_path(&digest));
+    }
+
+    #[tokio::test]
+    async fn set_target_transient_manifest_read_is_not_rejected() {
+        use crate::publish::LOG_MANIFEST_SCHEMA;
+        use comb_core::commit::CommitHeader;
+        use comb_core::HEADER_SCHEMA;
+
+        let mem = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem.clone(), None);
+        let op = store.mint_operation();
+        let header = CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "owned".into(),
+            generation: 1,
+            epoch: 0,
+            identity: op.to_string(),
+            request: store.key.digest(b"req"),
+            parent: None,
+            skip: None,
+            at: chrono::Utc::now(),
+        };
+        header.validate().unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA,
+            "header": header,
+            "log": "owned",
+            "epoch": 0,
+            "head_seq": 0,
+            "chunks": [],
+            "retention": "complete",
+        }))
+        .unwrap();
+        let digest = store
+            .put_object(
+                ObjectKind::Blob,
+                LOG_MANIFEST_SCHEMA,
+                payload,
+                nz(64 * 1024),
+            )
+            .await
+            .unwrap();
+        store
+            .set_target("owned", digest.clone(), None)
+            .await
+            .unwrap();
+
+        let fp = Arc::new(FailpointBackend::io_on_next_get_limited(mem, "/objects/"));
+        let fenced = store_with_cache(fp, None);
+        let other = store.key.digest(b"other");
+        let err = fenced.set_target("owned", other, None).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::BackendUnavailable(_)) | Some(CoreError::Io(_))
+            ),
+            "transient manifest read must not become Rejected, got {err:#}"
+        );
     }
 }
