@@ -15,9 +15,11 @@ Shared Core and Log implementation proceeds on `feat/reliable-log`.
 - A capability handshake describes supported operations and hard limits. An adapter
   awaiting a shared Log capability returns `Unsupported`; it never silently weakens
   a requested guarantee.
-- Append carries a stable `idempotency_key` and opaque binary payloads encoded as hex.
+- Append carries one stable `idempotency_key` and one opaque binary `payload_hex`.
   The key is independent of the transport request ID. Foundation uses document ID
-  plus envelope hash. Comb does not parse the Foundation document format.
+  plus envelope hash. Both key and payload use hex. The key bytes are
+  `u32be(docId UTF-8 byte length) || docId UTF-8 || u32be(32) || raw envelope SHA256`.
+  Comb does not parse the Foundation document format. Batch append is deferred.
 - The same key and bytes return the original logical append result for the lifetime
   of the retained complete feed. This includes process restart, a fresh client, and
   more than seven days. Changed bytes under that key fail with a conflict.
@@ -34,8 +36,10 @@ Shared Core and Log implementation proceeds on `feat/reliable-log`.
 - Backend errors, fenced writers, conflicts, invalid input, and unsupported operations
   have stable machine-readable codes. Diagnostics stay on stderr; stdout is protocol
   frames only.
-- Request frames, outstanding requests, queued output, append batches, response pages,
+- Input and output frames, outstanding requests, queued output, payloads, response pages,
   and follow waits all have hard limits. Underlying Log reads must also be bounded.
+  Raw payload byte budgets are separate from encoded JSON frame budgets; hex uses
+  two wire bytes per raw byte before JSON metadata.
 
 ## Foundation fixture
 

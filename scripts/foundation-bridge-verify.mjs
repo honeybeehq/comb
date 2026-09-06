@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { foundationStableKey } from './foundation-bridge-key.mjs';
 
 if (process.argv.length !== 4) {
   throw new Error('usage: tsx foundation-bridge-verify.mjs <foundation-repo> <captured-feed.json>');
@@ -17,6 +18,7 @@ const updates = [];
 for (const change of capture.changes) {
   const expected = expectedByKey.get(change.idempotency_key);
   assert.ok(expected, `unexpected key ${change.idempotency_key}`);
+  assert.equal(change.idempotency_key, foundationStableKey(fixture.doc_id, expected.envelope_hash));
   assert.ok(!seen.has(change.idempotency_key), `duplicate key ${change.idempotency_key}`);
   seen.add(change.idempotency_key);
   assert.equal(change.payload_hex, expected.payload_hex, 'stored Foundation bytes changed');

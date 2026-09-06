@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { foundationStableKey } from './foundation-bridge-key.mjs';
 
 const foundationRepo = resolve(process.argv[2] ?? process.cwd());
 const { createChain, loadChain, exportBlobs, importBlobs } = await import(
@@ -44,7 +45,7 @@ try {
     const bytes = await readFile(join(directory, filename));
     const envelopeHash = filename.slice(0, -'.fdnc'.length);
     return {
-      idempotency_key: `${docId}:${envelopeHash}`,
+      idempotency_key: foundationStableKey(docId, envelopeHash),
       envelope_hash: envelopeHash,
       is_genesis: envelopeHash === genesisHash,
       payload_hex: bytes.toString('hex'),
