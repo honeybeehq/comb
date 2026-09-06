@@ -545,3 +545,315 @@ async fn review_concurrent_same_key_returns_original_receipt() {
     assert_eq!(page.events.len(), 1);
     assert!(page.at_head);
 }
+
+#[tokio::test]
+async fn review_missing_target_after_release_is_not_empty() {
+    let (feed, backend) = setup().await;
+    let a = feed
+        .writer_session(
+            WriterLabel::try_from("same").unwrap(),
+            LeasePolicy::bridge_default(),
+        )
+        .unwrap();
+    a.append_stable(
+        StableKey::try_from_canonical(b"one".to_vec()).unwrap(),
+        Bytes::from_static(b"payload"),
+        &call(),
+    )
+    .await
+    .unwrap();
+    a.close(&call()).await.unwrap();
+    clear_committed_target(&backend).await;
+    let got = feed.read_page(Cursor::first(0), limits(), &call()).await;
+    assert!(
+        matches!(got, Err(ReadError::Integrity(_))),
+        "missing retained target after release became empty: {got:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_missing_target_after_release_cannot_reset_key() {
+    let (feed, backend) = setup().await;
+    let a = feed
+        .writer_session(
+            WriterLabel::try_from("same").unwrap(),
+            LeasePolicy::bridge_default(),
+        )
+        .unwrap();
+    let key = StableKey::try_from_canonical(b"one".to_vec()).unwrap();
+    a.append_stable(key.clone(), Bytes::from_static(b"payload"), &call())
+        .await
+        .unwrap();
+    a.close(&call()).await.unwrap();
+    clear_committed_target(&backend).await;
+    let b = feed
+        .writer_session(
+            WriterLabel::try_from("same").unwrap(),
+            LeasePolicy::bridge_default(),
+        )
+        .unwrap();
+    let got = b
+        .append_stable(key, Bytes::from_static(b"different"), &call())
+        .await;
+    assert!(got.is_err(), "released committed key was reset: {got:?}");
+}
+
+#[tokio::test]
+async fn review_old_target_cannot_hide_committed_key() {
+    let (feed, backend) = setup().await;
+    let a = feed
+        .writer_session(
+            WriterLabel::try_from("same").unwrap(),
+            LeasePolicy::bridge_default(),
+        )
+        .unwrap();
+    a.append_stable(
+        StableKey::try_from_canonical(b"one".to_vec()).unwrap(),
+        Bytes::from_static(b"payload"),
+        &call(),
+    )
+    .await
+    .unwrap();
+    let ref_key = "comb/v3/tenants/review/refs/log/parent/p0.json";
+    let (bytes, _) = backend.get(ref_key).await.unwrap();
+    let first: comb_core::RefValue = serde_json::from_slice(&bytes).unwrap();
+    let second_key = StableKey::try_from_canonical(b"two".to_vec()).unwrap();
+    a.append_stable(second_key.clone(), Bytes::from_static(b"payload2"), &call())
+        .await
+        .unwrap();
+    let (bytes, version) = backend.get(ref_key).await.unwrap();
+    let mut current: comb_core::RefValue = serde_json::from_slice(&bytes).unwrap();
+    current.target = first.target;
+    backend
+        .put_update(
+            ref_key,
+            Some(&version),
+            &serde_json::to_vec(&current).unwrap(),
+        )
+        .await
+        .unwrap();
+    let got = a
+        .append_stable(second_key, Bytes::from_static(b"different"), &call())
+        .await;
+    assert!(got.is_err(), "old target hid committed key: {got:?}");
+}
+
+struct PausedRefRead {
+    pause_write: std::sync::atomic::AtomicBool,
+    inner: MemoryBackend,
+    pause: std::sync::atomic::AtomicBool,
+    entered: std::sync::atomic::AtomicBool,
+    resume: tokio::sync::Notify,
+    updates: std::sync::atomic::AtomicUsize,
+}
+
+impl PausedRefRead {
+    fn new() -> Self {
+        Self {
+            inner: MemoryBackend::new(),
+            pause_write: false.into(),
+            pause: false.into(),
+            entered: false.into(),
+            resume: tokio::sync::Notify::new(),
+            updates: 0.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectBackend for PausedRefRead {
+    async fn put_create(
+        &self,
+        k: &str,
+        b: &[u8],
+    ) -> comb_core::error::Result<comb_object::Version> {
+        if k.contains("/objects/") && self.pause_write.swap(false, Ordering::SeqCst) {
+            self.entered.store(true, Ordering::SeqCst);
+            self.resume.notified().await;
+        }
+        self.inner.put_create(k, b).await
+    }
+    async fn put_update(
+        &self,
+        k: &str,
+        v: Option<&comb_object::Version>,
+        b: &[u8],
+    ) -> comb_core::error::Result<comb_object::Version> {
+        let got = self.inner.put_update(k, v, b).await;
+        if got.is_ok() {
+            self.updates.fetch_add(1, Ordering::SeqCst);
+        }
+        got
+    }
+    async fn get(&self, k: &str) -> comb_core::error::Result<(Vec<u8>, comb_object::Version)> {
+        self.inner.get(k).await
+    }
+    async fn get_limited(
+        &self,
+        k: &str,
+        n: std::num::NonZeroU64,
+    ) -> comb_core::error::Result<(Vec<u8>, comb_object::Version)> {
+        if k.contains("/refs/") && self.pause.swap(false, Ordering::SeqCst) {
+            self.entered.store(true, Ordering::SeqCst);
+            self.resume.notified().await;
+        }
+        self.inner.get_limited(k, n).await
+    }
+    async fn exists(&self, k: &str) -> comb_core::error::Result<bool> {
+        self.inner.exists(k).await
+    }
+    async fn delete(&self, k: &str) -> comb_core::error::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn list(&self, k: &str) -> comb_core::error::Result<Vec<comb_object::ObjectInfo>> {
+        self.inner.list(k).await
+    }
+}
+
+#[tokio::test]
+async fn review_renewal_rechecks_clock_after_delayed_read() {
+    let backend = Arc::new(PausedRefRead::new());
+    let clock = Arc::new(JumpClock(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    )));
+    let store = Arc::new(
+        Store::new(
+            backend.clone(),
+            "review",
+            DigestKey::from_bytes([9; 32]),
+            None,
+        )
+        .with_clock(clock.clone()),
+    );
+    let feed = CompleteFeed::open(store, "paused".into(), &call())
+        .await
+        .unwrap();
+    let policy = LeasePolicy {
+        ttl: Duration::from_secs(2),
+        renew_every: Duration::from_millis(100),
+        clock_slack: Duration::ZERO,
+        initial_acquire_budget: Duration::from_secs(2),
+    };
+    let writer = feed
+        .writer_session(WriterLabel::try_from("paused").unwrap(), policy)
+        .unwrap();
+    writer.ready(&call()).await.unwrap();
+    let before = backend.updates.load(Ordering::SeqCst);
+    backend.pause.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !backend.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    clock.0.fetch_add(3, Ordering::SeqCst);
+    backend.resume.notify_one();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        backend.updates.load(Ordering::SeqCst),
+        before,
+        "expired lease was rewritten using pre-read clock"
+    );
+    assert!(
+        matches!(writer.state(), WriterState::Lost { .. }),
+        "expired renewal did not lose ownership: {:?}",
+        writer.state()
+    );
+}
+
+#[tokio::test]
+async fn review_hung_idle_renewal_loses_by_lease_deadline() {
+    let backend = Arc::new(PausedRefRead::new());
+    let store = Arc::new(Store::new(
+        backend.clone(),
+        "review",
+        DigestKey::from_bytes([9; 32]),
+        None,
+    ));
+    let feed = CompleteFeed::open(store, "paused".into(), &call())
+        .await
+        .unwrap();
+    let policy = LeasePolicy {
+        ttl: Duration::from_secs(1),
+        renew_every: Duration::from_millis(100),
+        clock_slack: Duration::ZERO,
+        initial_acquire_budget: Duration::from_secs(2),
+    };
+    let writer = feed
+        .writer_session(WriterLabel::try_from("paused").unwrap(), policy)
+        .unwrap();
+    writer.ready(&call()).await.unwrap();
+    backend.pause.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !backend.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(
+        matches!(writer.state(), WriterState::Lost { .. }),
+        "hung renewal stayed Active beyond lease: {:?}",
+        writer.state()
+    );
+}
+
+#[tokio::test]
+async fn review_append_cannot_publish_after_lease_expires_during_upload() {
+    let backend = Arc::new(PausedRefRead::new());
+    let clock = Arc::new(JumpClock(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    )));
+    let store = Arc::new(
+        Store::new(
+            backend.clone(),
+            "review",
+            DigestKey::from_bytes([9; 32]),
+            None,
+        )
+        .with_clock(clock.clone()),
+    );
+    let feed = CompleteFeed::open(store, "paused".into(), &call())
+        .await
+        .unwrap();
+    let policy = LeasePolicy {
+        ttl: Duration::from_secs(2),
+        renew_every: Duration::from_secs(1),
+        clock_slack: Duration::ZERO,
+        initial_acquire_budget: Duration::from_secs(2),
+    };
+    let writer = Arc::new(
+        feed.writer_session(WriterLabel::try_from("paused").unwrap(), policy)
+            .unwrap(),
+    );
+    writer.ready(&call()).await.unwrap();
+    backend.pause_write.store(true, Ordering::SeqCst);
+    let pending = {
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            writer
+                .append_stable(
+                    StableKey::try_from_canonical(b"one".to_vec()).unwrap(),
+                    Bytes::from_static(b"payload"),
+                    &call(),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !backend.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    clock.0.fetch_add(3, Ordering::SeqCst);
+    backend.resume.notify_one();
+    let got = pending.await.unwrap();
+    assert!(
+        got.is_err(),
+        "new append published after lease expired during upload: {got:?}"
+    );
+}

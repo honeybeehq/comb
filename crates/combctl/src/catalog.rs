@@ -153,6 +153,9 @@ fn map_catalog_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
         Ok(CoreError::Io(io)) => {
             CoreError::BackendUnavailable(format!("catalog node {digest}: {io}")).into()
         }
+        Ok(CoreError::NotFound(_)) => {
+            CoreError::IntegrityError(format!("catalog node {digest} is missing")).into()
+        }
         Ok(other) => other.into(),
         Err(e) => CoreError::IntegrityError(format!("catalog node {digest}: {e:#}")).into(),
     }

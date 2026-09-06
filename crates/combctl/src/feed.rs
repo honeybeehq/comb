@@ -4,7 +4,7 @@ use super::{AppendRange, Frame, RetentionMode, StableAppendReceipt, CHUNK_SCHEMA
 use crate::catalog::{self, CatalogChunkRef, CatalogState};
 use crate::hamt::{self, IndexHead, Lookup, StableIndexEntry, StableIndexRoot};
 use crate::publish::{
-    CasResult, HeadSnapshot, PrepareCtx, PreparedMutation, RefMutationPlan, Upload,
+    CasResult, CommitView, HeadSnapshot, PrepareCtx, PreparedMutation, RefMutationPlan, Upload,
 };
 use crate::store::{KeyLayout, Store};
 use anyhow::Result;
@@ -489,7 +489,7 @@ impl CompleteFeed {
                 }
             }
             Some(head) => {
-                let _ = feed.published_or_empty(&head.value, call).await?;
+                let _ = feed.validated_publication(&head.value, call).await?;
             }
         }
         Ok(feed)
@@ -549,24 +549,81 @@ impl CompleteFeed {
         Ok(manifest)
     }
 
-    async fn published_or_empty(
+    async fn bound_target(
+        &self,
+        value: &RefValue,
+        call: &CallContext,
+    ) -> Result<Option<Digest>, OpenLogError> {
+        if value.generation == 0 && value.head_commit.is_none() && value.target.is_none() {
+            return Ok(None);
+        }
+        if value.generation > 0 && value.head_commit.is_none() {
+            return Err(OpenLogError::Integrity(LogIntegrityError(
+                "missing head_commit with published generation".into(),
+            )));
+        }
+        let Some(commit) = &value.head_commit else {
+            return Err(OpenLogError::Integrity(LogIntegrityError(
+                "target without head_commit".into(),
+            )));
+        };
+        let view = timed(call, self.store.load_commit_view(commit)).await?;
+        bind_published_target(&self.resource, value, &view)
+            .map_err(|e| OpenLogError::Integrity(LogIntegrityError(e.to_string())))
+    }
+
+    async fn validated_publication(
         &self,
         value: &RefValue,
         call: &CallContext,
     ) -> Result<Option<CompleteLogManifest>, OpenLogError> {
-        if let Some(digest) = &value.target {
-            return Ok(Some(self.load_manifest(digest, call).await?));
-        }
-        let Some(commit) = &value.head_commit else {
+        let Some(digest) = self.bound_target(value, call).await? else {
             return Ok(None);
         };
-        match timed(call, self.store.load_commit_view(commit)).await {
-            Ok(view) if view.target_follows_commit => Err(OpenLogError::Integrity(
-                LogIntegrityError("existing ref has a published log commit but no target".into()),
-            )),
-            Ok(_) => Ok(None),
-            Err(e) => Err(e),
-        }
+        Ok(Some(self.load_manifest(&digest, call).await?))
+    }
+}
+
+fn bind_published_target(
+    resource: &str,
+    value: &RefValue,
+    view: &CommitView,
+) -> std::result::Result<Option<Digest>, CoreError> {
+    if view.header.resource != resource || value.name != resource {
+        return Err(CoreError::IntegrityError(format!(
+            "commit resource {} does not bind {resource}",
+            view.header.resource
+        )));
+    }
+    if view.header.generation != value.generation {
+        return Err(CoreError::IntegrityError(format!(
+            "commit generation {} disagrees with ref {}",
+            view.header.generation, value.generation
+        )));
+    }
+    if view.header.epoch > value.epoch {
+        return Err(CoreError::IntegrityError(format!(
+            "commit epoch {} is ahead of ref {}",
+            view.header.epoch, value.epoch
+        )));
+    }
+    let persisted = if view.target_follows_commit {
+        Some(view.digest.clone())
+    } else {
+        view.ref_state.as_ref().and_then(|r| r.target.clone())
+    };
+    match (&value.target, persisted) {
+        (None, None) => Ok(None),
+        (Some(live), Some(persisted)) if live == &persisted => Ok(Some(persisted)),
+        (Some(_), Some(_)) => Err(CoreError::IntegrityError(
+            "live target disagrees with committed target".into(),
+        )),
+        (None, Some(_)) => Err(CoreError::IntegrityError(
+            "committed target missing from ref".into(),
+        )),
+        (Some(_), None) => Err(CoreError::IntegrityError(
+            "live target without committed target".into(),
+        )),
     }
 }
 
@@ -606,7 +663,7 @@ impl LogReader for CompleteFeed {
             },
             Some(h) => {
                 let (head_seq, trim_before_seq) = match self
-                    .published_or_empty(&h.value, call)
+                    .validated_publication(&h.value, call)
                     .await
                     .map_err(open_to_read)?
                 {
@@ -741,10 +798,11 @@ impl CompleteFeed {
                 next_at_head: Cursor::first(0),
             });
         };
-        let Some(digest) = &head.value.target else {
-            self.published_or_empty(&head.value, call)
-                .await
-                .map_err(open_to_read)?;
+        let Some(manifest) = self
+            .validated_publication(&head.value, call)
+            .await
+            .map_err(open_to_read)?
+        else {
             if cursor.next_seq == 1 {
                 return Ok(ReadPage {
                     events: Vec::new(),
@@ -759,10 +817,6 @@ impl CompleteFeed {
                 next_at_head: Cursor::first(0),
             });
         };
-        let manifest = self
-            .load_manifest(digest, call)
-            .await
-            .map_err(open_to_read)?;
         let head_seq = manifest.head_seq;
         let at_head_seq = checked_next(head_seq, "snapshot head")?;
         let at_head_cursor = Cursor {
@@ -1161,25 +1215,47 @@ impl WriterSession {
                 tokio::time::sleep(policy.renew_every).await;
                 let now = store.clock().now();
                 let st = state.borrow().clone();
-                match st {
-                    WriterState::Active {
-                        epoch: e,
-                        lease_until,
-                    } if e == epoch => {
-                        if lease_until <= now + slack {
-                            let _ = state.send(WriterState::Lost {
-                                epoch: Some(epoch),
-                                cause: SessionLoss::LeaseExpired,
-                            });
-                            return;
-                        }
-                    }
-                    _ => return,
+                let WriterState::Active {
+                    epoch: e,
+                    lease_until,
+                } = st
+                else {
+                    return;
+                };
+                if e != epoch {
+                    return;
                 }
-                match store
-                    .renew_owned_lease(&resource, &instance, epoch, ttl)
-                    .await
-                {
+                if lease_until <= now + slack {
+                    let _ = state.send(WriterState::Lost {
+                        epoch: Some(epoch),
+                        cause: SessionLoss::LeaseExpired,
+                    });
+                    return;
+                }
+                let remaining = match (lease_until - slack - now).to_std() {
+                    Ok(d) if !d.is_zero() => d,
+                    _ => {
+                        let _ = state.send(WriterState::Lost {
+                            epoch: Some(epoch),
+                            cause: SessionLoss::LeaseExpired,
+                        });
+                        return;
+                    }
+                };
+                let renew = store.renew_owned_lease(&resource, &instance, epoch, ttl);
+                tokio::pin!(renew);
+                let result = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep(remaining) => {
+                        let _ = state.send(WriterState::Lost {
+                            epoch: Some(epoch),
+                            cause: SessionLoss::LeaseExpired,
+                        });
+                        return;
+                    }
+                    r = &mut renew => r,
+                };
+                match result {
                     Ok(value) => {
                         let Some(lease) = value.lease.as_ref() else {
                             let _ = state.send(WriterState::Lost {
@@ -1208,6 +1284,7 @@ impl WriterSession {
                             Some(CoreError::Rejected(m)) if m.contains("expired") => {
                                 SessionLoss::LeaseExpired
                             }
+                            Some(CoreError::LeaseHeld { .. }) => SessionLoss::OwnerChanged,
                             Some(CoreError::Rejected(m)) if m.contains("owner") => {
                                 SessionLoss::OwnerChanged
                             }
@@ -1231,18 +1308,14 @@ impl WriterSession {
         payload_hash: &Digest,
         call: &CallContext,
     ) -> Result<Option<StableAppendReceipt>, StableAppendError> {
-        let Some(digest) = &snapshot.value.target else {
-            self.feed
-                .published_or_empty(&snapshot.value, call)
-                .await
-                .map_err(open_to_append)?;
+        let Some(manifest) = self
+            .feed
+            .validated_publication(&snapshot.value, call)
+            .await
+            .map_err(open_to_append)?
+        else {
             return Ok(None);
         };
-        let manifest = self
-            .feed
-            .load_manifest(digest, call)
-            .await
-            .map_err(open_to_append)?;
         let found = timed_read(
             call,
             hamt::lookup(
@@ -1374,6 +1447,12 @@ impl WriterSession {
                         cause: SessionLoss::OwnerChanged,
                     }));
                 }
+                Err(StableAppendError::Lease(LeaseError::ReacquireRequired { cause })) => {
+                    self.lose(cause.clone());
+                    return Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
+                        cause,
+                    }));
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1439,6 +1518,11 @@ fn cas_from_anyhow(e: anyhow::Error) -> StableAppendError {
             session_epoch: *caller,
             live_epoch: *live,
         }),
+        Some(CoreError::Rejected(m)) if m.contains("expired") => {
+            StableAppendError::Lease(LeaseError::ReacquireRequired {
+                cause: SessionLoss::LeaseExpired,
+            })
+        }
         Some(CoreError::LeaseHeld { holder, until }) => {
             let owner = WriterInstanceId::try_from_canonical(holder)
                 .unwrap_or_else(WriterInstanceId::generate);
@@ -1500,36 +1584,37 @@ impl RefMutationPlan for CompleteAppendPlan {
         if self.payload.len() as u64 > MAX_CHUNK_RAW_BYTES {
             return Err(CoreError::Rejected("event exceeds chunk raw cap".into()).into());
         }
-        let (mut catalog, mut index, mut head_seq) = if current.target.is_none() {
-            if let Some(commit) = &current.head_commit {
-                let view = ctx.store.load_commit_view(commit).await?;
-                if view.target_follows_commit {
-                    return Err(CoreError::IntegrityError(
-                        "existing ref has a published log commit but no target".into(),
-                    )
-                    .into());
-                }
-            }
-            (
+        let bound = if current.generation == 0
+            && current.head_commit.is_none()
+            && current.target.is_none()
+        {
+            None
+        } else {
+            let commit = current.head_commit.as_ref().ok_or_else(|| {
+                CoreError::IntegrityError("missing head_commit with published generation".into())
+            })?;
+            let view = ctx.store.load_commit_view(commit).await?;
+            bind_published_target(&self.resource, current, &view)?
+        };
+        let (mut catalog, mut index, mut head_seq) = match bound {
+            None => (
                 CatalogState::Empty,
                 hamt::empty_root(ctx.store).await?,
                 0u64,
-            )
-        } else {
-            let spec = EnvelopeReadSpec {
-                tenant: &ctx.store.tenant,
-                kind: ObjectKind::Blob,
-                allowed_schemas: MANIFEST_SCHEMAS,
-                max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
-                max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
-            };
-            let (payload, _) = ctx
-                .store
-                .get_blob_limited(current.target.as_ref().unwrap(), spec)
-                .await?;
-            let m: CompleteLogManifest = serde_json::from_slice(&payload)?;
-            validate_complete_manifest(&self.resource, &m)?;
-            (m.catalog, m.stable_index, m.head_seq)
+            ),
+            Some(digest) => {
+                let spec = EnvelopeReadSpec {
+                    tenant: &ctx.store.tenant,
+                    kind: ObjectKind::Blob,
+                    allowed_schemas: MANIFEST_SCHEMAS,
+                    max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
+                    max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
+                };
+                let (payload, _) = ctx.store.get_blob_limited(&digest, spec).await?;
+                let m: CompleteLogManifest = serde_json::from_slice(&payload)?;
+                validate_complete_manifest(&self.resource, &m)?;
+                (m.catalog, m.stable_index, m.head_seq)
+            }
         };
         let seq = head_seq
             .checked_add(1)

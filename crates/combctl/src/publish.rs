@@ -854,7 +854,15 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        next.updated_at = now;
+        let cas_now = self.clock().now();
+        if let Some(lease) = next.lease.as_ref() {
+            if lease.lease_until <= cas_now {
+                return Err(CoreError::Rejected("lease expired".into()).into());
+            }
+            next.updated_at = cas_now;
+        } else {
+            next.updated_at = now;
+        }
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self
@@ -1065,7 +1073,15 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        next.updated_at = now;
+        let cas_now = self.clock().now();
+        if let Some(lease) = next.lease.as_ref() {
+            if lease.lease_until <= cas_now {
+                return Err(CoreError::Rejected("lease expired".into()).into());
+            }
+            next.updated_at = cas_now;
+        } else {
+            next.updated_at = now;
+        }
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self
@@ -1347,11 +1363,11 @@ impl Store {
         ttl_secs: i64,
     ) -> Result<RefValue> {
         for _ in 0..16 {
-            let now = self.clock().now();
             let snapshot = self
                 .read_head(name)
                 .await?
                 .ok_or_else(|| anyhow!("ref {name} does not exist"))?;
+            let now = self.clock().now();
             if snapshot.value.epoch != epoch {
                 return Err(CoreError::Fenced {
                     caller: epoch,
@@ -1365,17 +1381,25 @@ impl Store {
                 );
             };
             if lease.writer != writer {
-                return Err(CoreError::Rejected("lease owner changed".into()).into());
+                return Err(CoreError::LeaseHeld {
+                    holder: lease.writer.clone(),
+                    until: lease.lease_until.to_rfc3339(),
+                }
+                .into());
             }
             if !snapshot.value.lease_live(now) {
+                return Err(CoreError::Rejected("lease expired".into()).into());
+            }
+            let cas_now = self.clock().now();
+            if !snapshot.value.lease_live(cas_now) {
                 return Err(CoreError::Rejected("lease expired".into()).into());
             }
             let mut next = snapshot.value.clone();
             next.lease = Some(comb_core::Lease {
                 writer: writer.into(),
-                lease_until: now + chrono::Duration::seconds(ttl_secs),
+                lease_until: cas_now + chrono::Duration::seconds(ttl_secs),
             });
-            next.updated_at = now;
+            next.updated_at = cas_now;
             let bytes = serde_json::to_vec_pretty(&next)?;
             match self
                 .backend
@@ -1398,7 +1422,6 @@ impl Store {
             self.reject_v1(name).await?;
         }
         for _ in 0..16 {
-            let now = self.clock().now();
             let snapshot = self
                 .read_head(name)
                 .await?
@@ -1416,12 +1439,13 @@ impl Store {
                 .as_ref()
                 .map(|l| l.writer.clone())
                 .ok_or_else(|| anyhow!("ref {name} has no lease to renew"))?;
+            let cas_now = self.clock().now();
             let mut next = snapshot.value.clone();
             next.lease = Some(comb_core::Lease {
                 writer,
-                lease_until: now + chrono::Duration::seconds(ttl_secs),
+                lease_until: cas_now + chrono::Duration::seconds(ttl_secs),
             });
-            next.updated_at = now;
+            next.updated_at = cas_now;
             let bytes = serde_json::to_vec_pretty(&next)?;
             match self
                 .backend
