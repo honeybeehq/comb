@@ -19,3 +19,9 @@ This document records orchestration facts for session continuation. It is not an
 
 - Core/Log R1 owner: b9ca1d3d-1a6f-4186-94eb-b71d34537dda, Grok grok-4.6/xhigh, exclusive production writer in comb-reliable-log. Generic timed operations and retained stable keys use immutable-history recovery.
 - Foundation bridge worker: 5711135c-4831-4bf7-8947-64bf35bba4ab. Foundation lead reserves the Cargo.toml default-run line for a small compatibility commit.
+
+- Root commits on feat/reliable-log: b7966bc design/baselines, 436658c default binary compatibility, dbe683a CI, c2a3914 Foundation fixtures. Feature branch pushed through dbe683a; CI run34016077878 passed tests and clippy. Later commits need pushing after verification.
+- Stable path FINAL correction: no Pending/permanent intent, opaque bounded key bytes, one key per change, HAMT rooted in same Log manifest CAS, durable Complete retention mode. See stable-key-addendum.md. R1 early sk1 string signature is obsolete. Urgency-now messages2383 and follow-up deliver this before further stable code; await corrected API.
+- Pheromone interim review findings delivered with urgency now2385: timestamp filter, bounded replay queues, SQL trim boundary, atomic seed, read snapshots, corrupt JSON errors, checked i64 allocation, durable SQLite sync. Worker retains ownership.
+- Live conditional-delete probe: S3 passes; MinIO ignores mismatched If-Match and deletes. Results in conditional-delete-backends.json. GC design review running on Claude judge25c989a5, expected /tmp/comb-gc-review.md. Complete-feed integration does not wait for GC.
+- Foundation fixture verifier independently passes with3 changes,2 annotations and expected hash. Actual bridge transport acceptance remains pending.

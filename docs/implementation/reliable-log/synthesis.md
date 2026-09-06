@@ -6,7 +6,7 @@ The independent Claude opus/max review selects candidate A, immutable commit-his
 
 Generic callers create an OperationId once. Within its configured seven-day default window, identical retries return the original logical result. Changed material requests conflict. Expired IDs return UnknownOperation, including after cleanup. Validate future skew and first-use allowance.
 
-Foundation has a separate stable append identity, scoped by tenant, document feed and caller key. Its docId plus envelope hash remains valid for the complete retained feed's lifetime, including fresh-peer recovery and retries after seven days. Different bytes with that key conflict. These keys never become newly admissible through timestamp reminting or local alias loss. Comb owns their durable intent and result evidence. Complete-feed mode retains both the feed and its stable-key evidence; it does not enable trim or physical deletion.
+Foundation has a separate stable append identity, scoped by tenant, document feed and caller key. Its docId plus envelope hash remains valid for the complete retained feed's lifetime, including fresh-peer recovery and retries after seven days. Different bytes with that key conflict. These keys never become newly admissible through timestamp reminting or local alias loss. Comb owns an authoritative persistent key index rooted in the same manifest CAS as the events. The stable path needs no separate Pending intent. Complete-feed mode retains both the feed and its stable-key evidence; it does not enable trim or physical deletion.
 
 ## Publication and recovery
 
@@ -20,7 +20,7 @@ Material hashes include tenant, resource, kind, semantic preconditions and order
 
 - Never overwrite another twin's only upload protection and claim GC safety. Proposed objects must be deterministic or protected by bounded attempt records. General collection remains disabled pending a separate proof.
 - Enforce dense commit ancestry and validate skip targets. State and test the actual read-cost bound; do not claim logarithmic work without measurements.
-- Stable-key records and compact commit evidence do not expire in complete-feed mode. Missing or malformed required recovery evidence is an error, not permission to append again.
+- Stable-key index entries and compact commit evidence do not expire in complete-feed mode. Missing or malformed required recovery evidence is an error, not permission to append again.
 - Cap producer admission count and encoded bytes. Coalesce identical duplicates within one group and reject changed input.
 - Rebuilding producer admission state fails closed on every unreadable required object.
 - Old binaries ignore added fields. A capability marker is not a fence. Use a distinct v2 storage namespace for the first fresh-prefix gate or a tested rejectable v1 seal with explicit migration. Never claim transparent mixed-version writing. Existing live tenants are untouched.
@@ -37,3 +37,5 @@ Root owns this directory and shared integration. One worker owns Comb Store/Log 
 ## Evidence
 
 The baseline has 23 passing Comb tests, 32 passing Pheromone tests, and nine passing backend conformance checks on each of MinIO and S3. See baseline-local.json, baseline-backends.json and cross-judge.md. Candidate documents record alternatives, not the final implementation contract.
+
+The stable-key-addendum.md defines the accepted index protocol. Its internal signatures remain a sketch until implemented. The bridge team owns wire field names; hex encoding and decimal-string positions are already agreed.
