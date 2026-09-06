@@ -6,7 +6,7 @@ Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evid
 
 - Root09572752 owns integration branchfeat/reliable-log-r1 in comb-reliable-log-r1, contracts, CI, review and live backend acceptance.
 - R1owner30db6b86: production accepted through aa94980. Final lost-CAS drill e61d872 passed memory/local with the owner and immutable S3/MinIO runs with root. Current task is accepted/idle.
-- R2 owner 3311b020: fixed a53d49b passes all prior 21 parent cases. Three further failures remain: exact original RefValue timestamp, legacy set_target after lease expiry, and suspended append publishing after Lost. Root also requires typed expiry errors. Current-only task /tmp/comb-r2-current-task.md contains these narrow corrections. Private target-r2; no bridge wiring.
+- R2 owner 3311b020: fixed 1698ecd passes all preceding 24 parent regressions. One termination case remains: after Lost, a still-blocked append waits for backend recovery or caller deadline. The current task requires loss and confirmed lease deadline selection during new publication. Typed expiry, original ref fidelity, legacy semantics and final CAS guard are closed. Private target-r2; no bridge wiring.
 - Foundationlead2efd79a9 owns bridge/fixture/acceptance paths. Parent adapter wiring waits for root-checked R2 APIs. Storage caps remainfalse.
 - Pheromoneowner135f7971: A1 accepted at16b3a2e in pher-comb-log/feat/comb-log; now idle. Current-only task `/tmp/comb-pher-current-task.md`.
 - RetiredR1b9ca has no ownership. Its branchfeat/reliable-log and commits4706b79/29d271e are excluded.
@@ -28,6 +28,8 @@ Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evid
 - [R2 closure review at 5b0d1d7](../../review/reliable-log-r2-closure-5b0d1d7.md) narrows the remaining work to validated ref/commit/target snapshots and lease deadlines across awaited work. [Executed evidence](verification/r2-closure-5b0d1d7.json).
 
 - [R2 closure review at a53d49b](../../review/reliable-log-r2-closure-a53d49b.md) records 21 closed cases and three executed remaining failures, including two verified regressions against 5b0d1d7. [Receipt](verification/r2-closure-a53d49b.json).
+
+- [R2 closure review at 1698ecd](../../review/reliable-log-r2-closure-1698ecd.md) closes all preceding 24 cases and records one remaining outstanding-I/O termination failure. [Receipt](verification/r2-closure-1698ecd.json).
 
 ## Remaining gates
 
