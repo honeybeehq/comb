@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Bridge, reserveOutputDirectory, writeSuccessfulCapture } from './foundation-bridge-client.mjs';
 
 if (![5, 6].includes(process.argv.length)) {
   throw new Error('usage: node foundation-bridge-acceptance.mjs <comb-bridge> <config-dir> <output-dir> [forward|reverse]');
@@ -17,92 +17,7 @@ assert.ok(['forward', 'reverse'].includes(arrivalOrder), 'arrival order must be 
 const changes = [...fixture.changes];
 if (arrivalOrder === 'reverse') changes.reverse();
 
-class Bridge {
-  pending = new Map();
-  nextId = 0;
-  buffer = '';
-  stderr = '';
-  maxFrameBytes = 1_048_576;
-
-  constructor(directory = configDir) {
-    this.child = spawn(binary, ['--dir', directory], { stdio: ['pipe', 'pipe', 'pipe'] });
-    this.exit = new Promise(resolve => {
-      this.child.once('exit', (code, signal) => {
-        this.fail(new Error(`bridge exited: code=${code}, signal=${signal}; ${this.stderr}`));
-        resolve({ code, signal });
-      });
-      this.child.once('error', error => {
-        this.fail(error);
-        resolve({ code: null, signal: null, error: error.message });
-      });
-    });
-    this.child.stdin.on('error', error => this.fail(error));
-    this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', text => { this.stderr = (this.stderr + text).slice(-32_768); });
-    this.child.stdout.setEncoding('utf8');
-    this.child.stdout.on('data', text => {
-      try {
-        this.buffer += text;
-        let newline;
-        while ((newline = this.buffer.indexOf('\n')) !== -1) {
-          assert.ok(Buffer.byteLength(this.buffer.slice(0, newline)) <= this.maxFrameBytes, 'bridge response exceeds its wire frame limit');
-          const response = JSON.parse(this.buffer.slice(0, newline));
-          this.buffer = this.buffer.slice(newline + 1);
-          assert.equal(response.v, 1);
-          const pending = this.pending.get(response.id);
-          assert.ok(pending, `unsolicited response ${response.id}`);
-          this.pending.delete(response.id);
-          clearTimeout(pending.timer);
-          pending.resolve(response);
-        }
-        assert.ok(Buffer.byteLength(this.buffer) <= this.maxFrameBytes, 'bridge emitted an unbounded partial frame');
-      } catch (error) {
-        this.fail(error);
-        this.child.kill();
-      }
-    });
-  }
-
-  fail(error) {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-  }
-
-  request(method, fields = {}, client = 'client') {
-    const id = `${client}-${++this.nextId}`;
-    const frame = JSON.stringify({ v: 1, id, op: method, ...fields });
-    assert.ok(Buffer.byteLength(frame) <= this.maxFrameBytes, 'test request exceeds negotiated frame limit');
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`request ${id}/${method} timed out`));
-        this.child.kill();
-      }, 60_000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(frame + '\n');
-    });
-  }
-
-  async ok(method, fields, client) {
-    const response = await this.request(method, fields, client);
-    assert.equal(response.ok, true, JSON.stringify(response));
-    const { v, id, ok, op, ...result } = response;
-    return result;
-  }
-
-  async close() {
-    this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill(), 5_000);
-    try {
-      return await this.exit;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-}
+await reserveOutputDirectory(outputDir);
 
 const binaryHash = createHash('sha256');
 for await (const chunk of createReadStream(binary)) binaryHash.update(chunk);
@@ -115,7 +30,7 @@ const receipt = {
   checks: [],
 };
 const recoveryConfig = await mkdtemp(join(tmpdir(), 'comb-bridge-recovery-'));
-let bridge = new Bridge();
+let bridge = new Bridge(binary, configDir);
 try {
   const hello = await bridge.ok('hello');
   receipt.hello = hello;
@@ -156,7 +71,7 @@ try {
   const beforeRestart = await bridge.close();
   assert.equal(beforeRestart.code, 0);
   await writeFile(join(recoveryConfig, 'config.toml'), await readFile(join(configDir, 'config.toml')), { mode: 0o600 });
-  bridge = new Bridge(recoveryConfig);
+  bridge = new Bridge(binary, recoveryConfig);
   await bridge.ok('hello');
   const restartedRetry = await bridge.ok('append', {
     log, idempotency_key: changes[0].idempotency_key, payload_hex: changes[0].payload_hex,
@@ -193,12 +108,9 @@ try {
   assert.equal(byteLimited.next_cursor, '2');
   receipt.checks.push('fresh client replays exact bytes with bounded pages and no silent gaps');
 
-  await mkdir(outputDir, { recursive: true });
-  await writeFile(join(outputDir, 'captured-feed.json'), JSON.stringify({ changes: captured }, null, 2) + '\n');
-  receipt.ok = true;
-  await writeFile(join(outputDir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
-  console.log(JSON.stringify(receipt));
+  const success = await writeSuccessfulCapture(bridge, outputDir, captured, receipt);
+  console.log(JSON.stringify(success));
 } finally {
-  await bridge.close();
+  await bridge.close().catch(() => {});
   await rm(recoveryConfig, { recursive: true, force: true });
 }

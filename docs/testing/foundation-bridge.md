@@ -147,7 +147,16 @@ node scripts/foundation-bridge-acceptance.mjs \
 Run once with `forward` and once with `reverse` to vary fixture submission order.
 The runner records the binary SHA256, handshake, and passed checks in `receipt.json`,
 and writes `captured-feed.json` for the Foundation verifier. It writes these artifacts
-only after the storage checks pass. Keep config directories private; they contain
+only after the storage checks pass and the process closes cleanly after draining stdout.
+Every invocation requires a new output directory; an existing directory is refused
+before starting the bridge. A failed run cannot leave a prior receipt looking current.
+The client retains terminal errors even when no request is pending.
+
+Run `node --test scripts/foundation-bridge-client.test.mjs` for deterministic client
+lifecycle checks, including late invalid output and stale receipt refusal. These
+checks simulate process I/O only and provide no storage acceptance evidence.
+
+Keep config directories private; they contain
 the tenant digest key. Use a new backend prefix for each live verification run.
 
 The runner has been checked against the provisional bridge: missing durable
