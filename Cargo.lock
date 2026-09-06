@@ -772,6 +772,7 @@ dependencies = [
  "blake3",
  "chrono",
  "hex",
+ "rand",
  "serde",
  "serde_json",
  "thiserror",

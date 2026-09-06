@@ -6,9 +6,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// In-memory backend for tests (spec §7.10). Version tokens are counters.
+type MemoryObject = (Vec<u8>, u64, DateTime<Utc>);
+
 #[derive(Default)]
 pub struct MemoryBackend {
-    state: Mutex<HashMap<String, (Vec<u8>, u64, DateTime<Utc>)>>,
+    state: Mutex<HashMap<String, MemoryObject>>,
 }
 
 impl MemoryBackend {
@@ -28,7 +30,12 @@ impl ObjectBackend for MemoryBackend {
         Ok(Version("1".into()))
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         let mut state = self.state.lock().unwrap();
         match (state.get(key), expected) {
             (None, None) => {
@@ -75,7 +82,10 @@ impl ObjectBackend for MemoryBackend {
             .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(prefix))
-            .map(|(k, (_, _, at))| ObjectInfo { key: k.clone(), modified: *at })
+            .map(|(k, (_, _, at))| ObjectInfo {
+                key: k.clone(),
+                modified: *at,
+            })
             .collect())
     }
 }
