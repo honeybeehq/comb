@@ -6,7 +6,7 @@ and delegates all durable publication, deduplication, and fencing to the shared 
 
 Implementation branch: `feat/foundation-bridge`. The first transport is stdio JSONL,
 brokered by the Foundation host. A separate socket server is outside this slice.
-Shared Core and Log implementation proceeds on `feat/reliable-log`.
+Shared Core and Log implementation proceeds on `feat/reliable-log-r1`.
 
 ## Required contract
 
@@ -66,8 +66,9 @@ A committed retry returns those original positions even after intervening writes
 Head returns `head`, `cursor`, and `trim_before`. Read returns `events` with `seq`,
 `at`, and `payload_hex`, plus `next_cursor` and `at_head`. Follow uses the same page
 and adds `timed_out` when its bounded wait expires. An empty page leaves its input
-cursor unchanged. Cursors use canonical unsigned decimal strings, without leading
-zeroes except for `"0"` itself.
+cursor unchanged. Request cursors use canonical positive decimal strings starting
+at `"1"`, without leading zeroes. `timeout_ms: 0` or an omitted timeout requests a
+non-blocking follow poll; page count and byte limits must be positive.
 
 Success frames contain `v`, `id`, `ok: true`, `op`, and the operation's fields.
 Error frames contain `v`, `id`, `ok: false`, and an `error` object with a stable
@@ -80,6 +81,10 @@ Invalid JSON or a frame too large to parse safely can have an empty response ID.
 the encoded line limit, which includes JSON fields and hex expansion. Both request
 and response lines must fit the wire limit. Page construction must respect the wire
 budget before emitting a cursor that advances past events.
+
+`idempotency_key` contains 1 to 512 opaque bytes, encoded as 2 to 1024 hex characters.
+Uppercase hex is accepted and normalized to lowercase. `max_idempotency_key_len`
+counts wire characters. Strings such as `doc:hash` are invalid keys.
 
 Unknown required capabilities and protocol versions return `unsupported`. Until
 R1 stable publication and R2 bounded reads are wired, hello advertises those
