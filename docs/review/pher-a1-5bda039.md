@@ -75,3 +75,11 @@ The seven focused tests ran in0.74seconds: six passed and the cleanup check fail
 Rebuilt the immutable `ca09777` archive at the owner's request. All six retry tests pass again, including the exact parent plain-listener cascade case. The newly added timer-file helper test also passes when run from the same binary. The cleanup test still fails: a retired listener remains in `applied_seqs`. No cascade failure is being attributed to this commit. Evidence is in `verification/pher-timer-ca09777.json` and the captured output.
 
 The active owner task files were shortened to current work only; historical imperative checklists were archived outside them. Pheromone's sole outstanding source fix is progress cleanup after retirement, followed by the final daemon smoke.
+
+## Final acceptance at 16b3a2e
+
+Accepted for A1 TrailLog/SqliteLog and the reviewed listener handoff scope. All seven parent regressions pass in an immutable16b3a2e source archive. The final daemon rebuilt successfully and an immutable copy passed the process smoke:520historical events,2live events, crash/restart, retained cursor and increasing sequence numbers. The source and executable hashes are in `verification/pher-a1-final-16b3a2e.json`. Focused test output is in `verification/pher-timer-16b3a2e.txt`.
+
+The final cleanup inserts applied progress only while the matcher still contains the subscription, covering retirement during delivery on either limit or lag. Startup code was unchanged, so the existing40-process/960-path verification atde71087 stands without another stress run. The owner reports76workspace tests passed. Parent verification independently covered the seven regressions, binary build and real-process smoke.
+
+Limits remain explicit: partition0; State held across localSQLite append; live and catch-up hold queues256each; slow consumers disconnect; process-local listener progress with at-least-once replay after a crash; catch-up tiers1-2 plus expect. Meaning/judge processing retains its documented follower behavior. ObjectLog/Comb integration and deterministic delivery IDs are later work. This acceptance does not enable Foundation storage capabilities or destructive collection.
