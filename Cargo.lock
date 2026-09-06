@@ -786,7 +786,6 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "blake3",
- "bytes",
  "chrono",
  "comb-core",
  "hex",

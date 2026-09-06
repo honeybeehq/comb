@@ -4,7 +4,7 @@
 //! Tests arm a rule against a key substring and a method; the rule fires
 //! after a counted number of matching successes.
 
-use crate::backend::{LimitedObject, ObjectBackend, ObjectInfo, Version};
+use crate::backend::{ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use comb_core::error::{CoreError, Result};
 use std::num::NonZeroU64;
@@ -16,6 +16,7 @@ pub enum FailMethod {
     PutUpdate,
     PutCreate,
     Get,
+    GetLimited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,11 +107,37 @@ impl FailpointBackend {
         fp
     }
 
+    /// Fail the next matching `get_limited` before the inner call.
+    pub fn drop_next_get_limited_request(inner: Arc<dyn ObjectBackend>, needle: &str) -> Self {
+        let fp = Self::new(inner);
+        fp.arm(FailRule {
+            method: FailMethod::GetLimited,
+            key_contains: needle.into(),
+            successes_before_fire: 0,
+            fires: 1,
+            action: FailAction::DropRequest,
+        });
+        fp
+    }
+
     /// Fail the next matching `get` with `CoreError::Io`.
     pub fn io_on_next_get(inner: Arc<dyn ObjectBackend>, needle: &str) -> Self {
         let fp = Self::new(inner);
         fp.arm(FailRule {
             method: FailMethod::Get,
+            key_contains: needle.into(),
+            successes_before_fire: 0,
+            fires: 1,
+            action: FailAction::Io,
+        });
+        fp
+    }
+
+    /// Fail the next matching `get_limited` with `CoreError::Io`.
+    pub fn io_on_next_get_limited(inner: Arc<dyn ObjectBackend>, needle: &str) -> Self {
+        let fp = Self::new(inner);
+        fp.arm(FailRule {
+            method: FailMethod::GetLimited,
             key_contains: needle.into(),
             successes_before_fire: 0,
             fires: 1,
@@ -231,8 +258,12 @@ impl ObjectBackend for FailpointBackend {
         }
     }
 
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
-        match self.decide(FailMethod::Get, key) {
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
+        match self.decide(FailMethod::GetLimited, key) {
             Some(FailAction::DropRequest) | Some(FailAction::DropResponse) => {
                 Err(self.injected_err("get_limited request lost"))
             }
@@ -299,7 +330,11 @@ impl ObjectBackend for CountingBackend {
         self.inner.get(key).await
     }
 
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
         self.gets.fetch_add(1, Ordering::Relaxed);
         self.inner.get_limited(key, max_encoded_bytes).await
     }

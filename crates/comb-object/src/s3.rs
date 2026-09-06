@@ -1,9 +1,8 @@
-use crate::backend::{object_too_large, LimitedObject, ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
-use bytes::Bytes;
 use comb_core::error::{CoreError, Result};
 use std::num::NonZeroU64;
 use tokio::io::AsyncReadExt;
@@ -149,7 +148,11 @@ impl ObjectBackend for S3Backend {
         Ok((bytes, Version(etag)))
     }
 
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
         let out = self
             .client
             .get_object()
@@ -174,10 +177,7 @@ impl ObjectBackend for S3Backend {
         if buf.len() as u64 > max_encoded_bytes.get() {
             return Err(object_too_large(key, max_encoded_bytes, None));
         }
-        Ok(LimitedObject {
-            bytes: Bytes::from(buf),
-            version: Version(etag),
-        })
+        Ok((buf, Version(etag)))
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

@@ -4,7 +4,7 @@ use comb_core::error::CoreError;
 use comb_core::operation::{
     Clock, Material, OpIdentity, OperationId, OperationPolicy, SystemClock,
 };
-use comb_core::{Digest, DigestKey, Envelope, ObjectClass, ObjectKind, RefValue};
+use comb_core::{Digest, DigestKey, Envelope, EnvelopeReadSpec, ObjectKind, RefValue};
 use comb_object::{ObjectBackend, Version};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -127,29 +127,16 @@ impl Store {
     ///
     /// The disk cache is subject to the same encoded cap as the backend.
     /// Oversized cache entries are quarantined and the backend is retried.
-    pub async fn get_blob_limited(
+    #[allow(dead_code)] // no log/publish callers until the retained-target SHA
+    pub(crate) async fn get_blob_limited(
         &self,
         digest: &Digest,
-        class: ObjectClass,
+        spec: EnvelopeReadSpec<'_>,
     ) -> Result<(Vec<u8>, GetSource)> {
         let object_key = self.object_key(digest);
-        match self.cache_read_limited(digest, &object_key, class.max_encoded_bytes) {
-            Ok(Some(bytes)) => match Envelope::decode_limited(
-                &bytes,
-                &self.key,
-                class.max_encoded_bytes,
-                class.expectation(),
-                &object_key,
-            ) {
+        match self.cache_read_limited(digest, &object_key, spec.max_encoded_bytes) {
+            Ok(Some(bytes)) => match Envelope::decode_limited(&bytes, &self.key, spec) {
                 Ok(env) if env.meta.digest == *digest => {
-                    if (env.payload.len() as u64) > class.max_plaintext_bytes.get() {
-                        return Err(CoreError::ObjectTooLarge {
-                            key: object_key,
-                            limit: class.max_plaintext_bytes.get(),
-                            actual: Some(env.payload.len() as u64),
-                        }
-                        .into());
-                    }
                     return Ok((env.payload, GetSource::Cache));
                 }
                 Ok(_) | Err(CoreError::IntegrityError(_)) | Err(CoreError::InvalidFormat(_)) => {
@@ -158,7 +145,7 @@ impl Store {
                         "warning: cache entry for {digest} failed verification — quarantined, refetching from backend"
                     );
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(size_key(e, &object_key).into()),
             },
             Ok(None) => {}
             Err(CoreError::ObjectTooLarge { .. }) => {
@@ -167,29 +154,17 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
 
-        let limited = self
+        let (bytes, _) = self
             .backend
-            .get_limited(&object_key, class.max_encoded_bytes)
-            .await?;
-        let env = Envelope::decode_limited(
-            &limited.bytes,
-            &self.key,
-            class.max_encoded_bytes,
-            class.expectation(),
-            &object_key,
-        )?;
+            .get_limited(&object_key, spec.max_encoded_bytes)
+            .await
+            .map_err(|e| size_key(e, &object_key))?;
+        let env = Envelope::decode_limited(&bytes, &self.key, spec)
+            .map_err(|e| size_key(e, &object_key))?;
         if env.meta.digest != *digest {
             return Err(anyhow_digest_mismatch(digest));
         }
-        if (env.payload.len() as u64) > class.max_plaintext_bytes.get() {
-            return Err(CoreError::ObjectTooLarge {
-                key: object_key,
-                limit: class.max_plaintext_bytes.get(),
-                actual: Some(env.payload.len() as u64),
-            }
-            .into());
-        }
-        self.cache_write(digest, limited.bytes.as_ref());
+        self.cache_write(digest, &bytes);
         Ok((env.payload, GetSource::Backend))
     }
 
@@ -201,6 +176,7 @@ impl Store {
         std::fs::read(self.cache_path(digest)?).ok()
     }
 
+    #[allow(dead_code)] // used by get_blob_limited
     fn cache_read_limited(
         &self,
         digest: &Digest,
@@ -361,6 +337,18 @@ impl From<Published<MutationResult>> for MutationOutcome {
 
 fn anyhow_digest_mismatch(digest: &Digest) -> anyhow::Error {
     anyhow::anyhow!("backend returned object whose digest does not match {digest}")
+}
+
+#[allow(dead_code)] // used by get_blob_limited
+fn size_key(err: CoreError, object_key: &str) -> CoreError {
+    match err {
+        CoreError::ObjectTooLarge { limit, actual, .. } => CoreError::ObjectTooLarge {
+            key: object_key.into(),
+            limit,
+            actual,
+        },
+        other => other,
+    }
 }
 
 async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Result<()> {
@@ -565,5 +553,148 @@ impl RefMutationPlan for ReleasePlan {
             admitted: Vec::new(),
             companions: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod limited_reads {
+    use super::*;
+    use comb_core::error::CoreError;
+    use comb_core::{DigestKey, EnvelopeReadSpec, ObjectKind};
+    use comb_object::memory::MemoryBackend;
+    use comb_object::ObjectBackend;
+    use std::num::NonZeroU64;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const BLOB_SCHEMAS: &[&str] = &["comb.object/v1"];
+
+    fn nz(n: u64) -> NonZeroU64 {
+        NonZeroU64::new(n).expect("nonzero")
+    }
+
+    fn blob_spec(enc: u64, pt: u64) -> EnvelopeReadSpec<'static> {
+        EnvelopeReadSpec {
+            tenant: "org_t",
+            kind: ObjectKind::Blob,
+            allowed_schemas: BLOB_SCHEMAS,
+            max_encoded_bytes: nz(enc),
+            max_plaintext_bytes: nz(pt),
+        }
+    }
+
+    fn store_with_cache(backend: Arc<dyn ObjectBackend>, cache: Option<PathBuf>) -> Store {
+        Store::new(backend, "org_t", DigestKey::from_bytes([3u8; 32]), cache)
+    }
+
+    fn core(err: anyhow::Error) -> CoreError {
+        match err.downcast::<CoreError>() {
+            Ok(e) => e,
+            Err(other) => panic!("expected CoreError, got {other:#}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_blob_limited_exact_encoded_cap() {
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem.clone(), None);
+        let payload = b"hello-limited".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let encoded = mem.get(&store.object_key(&digest)).await.unwrap().0;
+        let (got, source) = store
+            .get_blob_limited(
+                &digest,
+                blob_spec(encoded.len() as u64, payload.len() as u64),
+            )
+            .await
+            .unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+
+        let err = core(
+            store
+                .get_blob_limited(
+                    &digest,
+                    blob_spec(encoded.len() as u64 - 1, payload.len() as u64),
+                )
+                .await
+                .unwrap_err(),
+        );
+        match err {
+            CoreError::ObjectTooLarge {
+                limit,
+                actual: Some(actual),
+                ..
+            } => {
+                assert_eq!(limit, encoded.len() as u64 - 1);
+                assert_eq!(actual, encoded.len() as u64);
+            }
+            other => panic!("expected ObjectTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_blob_limited_plaintext_cap() {
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, None);
+        let payload = vec![0xff; 64];
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let err = core(
+            store
+                .get_blob_limited(&digest, blob_spec(4 * 1024, 63))
+                .await
+                .unwrap_err(),
+        );
+        match err {
+            CoreError::ObjectTooLarge {
+                limit: 63,
+                actual: Some(64),
+                ..
+            } => {}
+            other => panic!("expected plaintext ObjectTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_cache_is_bounded_quarantined_and_refetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, Some(cache.clone()));
+        let payload = b"tiny".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        store
+            .get_blob_limited(&digest, blob_spec(4096, 4096))
+            .await
+            .unwrap();
+        std::fs::write(cache.join(digest.hex()), vec![0u8; 256 * 1024]).unwrap();
+
+        let (got, source) = store
+            .get_blob_limited(&digest, blob_spec(1024, 1024))
+            .await
+            .unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+        assert!(cache
+            .join(digest.hex())
+            .with_extension("quarantine")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn cache_hit_uses_limited_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, Some(cache));
+        let payload = b"cached".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let spec = blob_spec(4096, 4096);
+        let _ = store.get_blob_limited(&digest, spec).await.unwrap();
+        let (got, source) = store.get_blob_limited(&digest, spec).await.unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Cache);
     }
 }

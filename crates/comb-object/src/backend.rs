@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use bytes::Bytes;
 use comb_core::error::{CoreError, Result};
 use std::io::Read;
 use std::num::NonZeroU64;
@@ -15,13 +14,6 @@ pub struct Version(pub String);
 pub struct ObjectInfo {
     pub key: String,
     pub modified: chrono::DateTime<chrono::Utc>,
-}
-
-/// Object bytes that already passed an encoded-size cap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LimitedObject {
-    pub bytes: Bytes,
-    pub version: Version,
 }
 
 pub(crate) fn object_too_large(key: &str, limit: NonZeroU64, actual: Option<u64>) -> CoreError {
@@ -69,7 +61,11 @@ pub trait ObjectBackend: Send + Sync {
     ///
     /// The cap is enforced before an unbounded clone or body collect. One
     /// extra byte above the cap is `ObjectTooLarge`, never a truncated body.
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject>;
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)>;
 
     async fn exists(&self, key: &str) -> Result<bool>;
 

@@ -1,6 +1,5 @@
-use crate::backend::{object_too_large, LimitedObject, ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use comb_core::error::{CoreError, Result};
 use std::collections::HashMap;
@@ -66,7 +65,11 @@ impl ObjectBackend for MemoryBackend {
             .ok_or_else(|| CoreError::NotFound(key.into()))
     }
 
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
         let state = self.state.lock().unwrap();
         let (bytes, version, _) = state
             .get(key)
@@ -75,10 +78,7 @@ impl ObjectBackend for MemoryBackend {
         if actual > max_encoded_bytes.get() {
             return Err(object_too_large(key, max_encoded_bytes, Some(actual)));
         }
-        Ok(LimitedObject {
-            bytes: Bytes::copy_from_slice(bytes),
-            version: Version(version.to_string()),
-        })
+        Ok((bytes.clone(), Version(version.to_string())))
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

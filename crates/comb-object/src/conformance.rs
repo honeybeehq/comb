@@ -187,7 +187,7 @@ pub async fn run(backend: Arc<dyn ObjectBackend>, key_prefix: &str) -> Vec<Check
         let got = backend.get_limited(&key, exact).await;
         let over = backend.get_limited(&key, under).await;
         let full = backend.get(&key).await;
-        let passed = matches!(&got, Ok(obj) if obj.bytes.as_ref() == body.as_slice())
+        let passed = matches!(&got, Ok((bytes, _)) if bytes == &body)
             && matches!(
                 &over,
                 Err(CoreError::ObjectTooLarge {
@@ -276,7 +276,7 @@ mod tests {
     async fn failpoint_get_limited_transient_is_not_not_found() {
         let mem = Arc::new(MemoryBackend::new());
         mem.put_create("k/present", b"abcd").await.unwrap();
-        let fp = FailpointBackend::drop_next_get_request(mem.clone(), "k/present");
+        let fp = FailpointBackend::drop_next_get_limited_request(mem.clone(), "k/present");
         let cap = NonZeroU64::new(16).unwrap();
         match fp.get_limited("k/present", cap).await {
             Err(CoreError::BackendUnavailable(_)) => {}
@@ -286,7 +286,7 @@ mod tests {
             Err(CoreError::NotFound(_)) => {}
             other => panic!("missing key must stay NotFound, got {other:?}"),
         }
-        let io = FailpointBackend::io_on_next_get(mem.clone(), "k/present");
+        let io = FailpointBackend::io_on_next_get_limited(mem.clone(), "k/present");
         match io.get_limited("k/present", cap).await {
             Err(CoreError::Io(_)) => {}
             other => panic!("injected io must stay Io, got {other:?}"),

@@ -1,8 +1,5 @@
-use crate::backend::{
-    object_too_large, read_sync_limited, LimitedObject, ObjectBackend, ObjectInfo, Version,
-};
+use crate::backend::{object_too_large, read_sync_limited, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
-use bytes::Bytes;
 use comb_core::error::{CoreError, Result};
 use std::fs;
 use std::io::Write;
@@ -144,7 +141,11 @@ impl ObjectBackend for LocalBackend {
         }
     }
 
-    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
         let path = self.path_for(key)?;
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
@@ -165,10 +166,7 @@ impl ObjectBackend for LocalBackend {
         };
         let bytes = read_sync_limited(file, key, max_encoded_bytes)?;
         let version = Self::version_of(&bytes);
-        Ok(LimitedObject {
-            bytes: Bytes::from(bytes),
-            version,
-        })
+        Ok((bytes, version))
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

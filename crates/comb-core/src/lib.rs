@@ -16,8 +16,8 @@ pub use commit::{
 };
 pub use digest::{Digest, DigestKey};
 pub use envelope::{
-    Envelope, EnvelopeExpectation, ObjectClass, ObjectKind, MAX_ENVELOPE_META_BYTES,
-    MAX_MANIFEST_OBJECT_BYTES, MAX_REF_OBJECT_BYTES, MAX_STABLE_INDEX_NODE_OBJECT_BYTES,
+    Envelope, EnvelopeReadSpec, ObjectKind, MAX_ENVELOPE_META_BYTES, MAX_MANIFEST_OBJECT_BYTES,
+    MAX_REF_OBJECT_BYTES, MAX_STABLE_INDEX_NODE_OBJECT_BYTES,
 };
 pub use error::{CoreError, EnvelopeFormatField};
 pub use operation::{

@@ -7,6 +7,7 @@ pub enum EnvelopeFormatField {
     Flags,
     Compression,
     Encryption,
+    Tenant,
     ObjectKind,
     Schema,
 }
@@ -18,6 +19,7 @@ impl std::fmt::Display for EnvelopeFormatField {
             Self::Flags => write!(f, "flags"),
             Self::Compression => write!(f, "compression"),
             Self::Encryption => write!(f, "encryption"),
+            Self::Tenant => write!(f, "tenant"),
             Self::ObjectKind => write!(f, "kind"),
             Self::Schema => write!(f, "schema"),
         }
