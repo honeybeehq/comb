@@ -69,3 +69,9 @@ All six timer and cascade retry checks pass in the isolated source archive, incl
 One cleanup regression fails. A limit-1 listener delivers and removes itself, clearing its progress entry through `remove_sub`. `apply_to_listener` then unconditionally inserts that entry again. Repeated short-lived listeners therefore grow `applied_seqs` with retired IDs. `review_retired_listener_drops_applied_progress` proves the entry survives after its matcher is gone. Record progress only while the listener still exists after delivery; this also covers retirement on lag. The owner has the exact test snippet.
 
 The seven focused tests ran in0.74seconds: six passed and the cleanup check failed. Compilation passed with the two existing connector dead-code warnings. Binary hash and output are in `verification/pher-timer-3691c2a.json` and its text artifact. Final daemon rebuild waits for this cleanup; startup code and its earlier verification remain unchanged.
+
+## Requested rerun at ca09777
+
+Rebuilt the immutable `ca09777` archive at the owner's request. All six retry tests pass again, including the exact parent plain-listener cascade case. The newly added timer-file helper test also passes when run from the same binary. The cleanup test still fails: a retired listener remains in `applied_seqs`. No cascade failure is being attributed to this commit. Evidence is in `verification/pher-timer-ca09777.json` and the captured output.
+
+The active owner task files were shortened to current work only; historical imperative checklists were archived outside them. Pheromone's sole outstanding source fix is progress cleanup after retirement, followed by the final daemon smoke.
