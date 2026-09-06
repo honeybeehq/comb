@@ -1,0 +1,91 @@
+{
+  "commit": "f238b0fe0c13a2399d8b30e4abfe453254d2de99",
+  "binary_sha256": "6761a8e0322b35309846bf732b1c145d5cba3460dddd03ce9239fd331ce8b5f8",
+  "tests": [
+    {
+      "test": "parent_eof_cancels_stalled_data_but_attempts_healthy_release",
+      "exit": 0,
+      "seconds": 0.596
+    },
+    {
+      "test": "parent_failed_opens_do_not_exhaust_log_capacity",
+      "exit": 0,
+      "seconds": 0.192
+    },
+    {
+      "test": "parent_one_failed_release_does_not_abort_a_healthy_sibling",
+      "exit": 0,
+      "seconds": 0.4
+    },
+    {
+      "test": "parent_steady_output_can_resume_after_five_seconds",
+      "exit": 0,
+      "seconds": 5.145
+    }
+  ],
+  "test_source_sha256": "2c96abd9581c83427969245038204f649f185c5f1fe605eaeeef9833e2d74ff8",
+  "integration_commit": "d1f8f7c",
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "combctl",
+        "--offline",
+        "--test",
+        "bridge_parent_review",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "exit": 0,
+      "seconds": 24.171
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--offline",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 122.049
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--offline"
+      ],
+      "exit": 0,
+      "seconds": 56.798
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "combctl",
+        "--bin",
+        "comb-bridge",
+        "--offline"
+      ],
+      "exit": 0,
+      "seconds": 30.202
+    }
+  ],
+  "javascript_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "ci": {
+    "run_id": 34040437301,
+    "conclusion": "success",
+    "integration_sha": "d1f8f7cf27603a6dd0a0db2dd7046574e2d71568"
+  }
+}

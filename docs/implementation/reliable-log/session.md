@@ -1,13 +1,13 @@
 # Execution state
 
-Coordination reference updated 2026-09-06T13:48:23.110065+00:00. Acceptance evidence is linked below.
+Coordination reference updated 2026-09-06T14:55:46.975096+00:00. Acceptance evidence is linked below.
 
 ## Ownership and current work
 
 - Root09572752 owns integration branchfeat/reliable-log-r1 in comb-reliable-log-r1, contracts, CI, review and live backend acceptance.
 - R1owner30db6b86: production accepted through aa94980. Final lost-CAS drill e61d872 passed memory/local with the owner and immutable S3/MinIO runs with root. Current task is accepted/idle.
 - R2 owner 3311b020: production accepted for bridge integration at 842ebf1. All 25 immutable parent cases pass; the outer guard covers the initial history read through final CAS. Owner is idle. Root owns the integration merge and live acceptance. [Adapter handoff](foundation-r2-adapter-handoff.md).
-- Foundation lead 2efd79a9 owns bridge, fixtures and acceptance paths. Adapter work is active in comb-foundation-r2-adapter on feat/foundation-r2-adapter, based on bff2edb, using the checked CompleteFeed and WriterSession APIs. Storage caps remain false until implementation and verification.
+- Foundation lead 2efd79a9 owns bridge, fixtures and acceptance paths in comb-foundation-r2-adapter. Adapter f238b0f is integrated as d1f8f7c; both implemented capabilities are true. Root fixed-archive tests, lint, build and CI pass. The owner is adding bounded same-key retry to the acceptance caller after a permitted transient S3 response; Rust production stays closed.
 - Pheromoneowner135f7971: A1 accepted at16b3a2e in pher-comb-log/feat/comb-log; now idle. Current-only task `/tmp/comb-pher-current-task.md`.
 - RetiredR1b9ca has no ownership. Its branchfeat/reliable-log and commits4706b79/29d271e are excluded.
 
@@ -37,12 +37,14 @@ Coordination reference updated 2026-09-06T13:48:23.110065+00:00. Acceptance evid
 
 - [Direct v3 live feed acceptance](../../review/reliable-log-r2-live-feed.md) passes on local, S3 and MinIO, including asserted lost final CAS reply, stable retry/conflict after an injected eight-day interval, fresh cache and bounded exact-byte pages. [Receipt](verification/r2-live-feed-842ebf1.json). Integration bff2edb CI34037372727 is green.
 
+- [Foundation adapter closure](../../review/foundation-adapter-f238b0f.md): four unchanged parent cases fail on b5fc422 and pass on f238b0f. Full workspace tests, clippy, build, Node checks and integration CI34040437301 pass. [First process attempt](verification/foundation-process-first-attempt.json) preserves the S3 transient failure; [same-key recovery probe](verification/foundation-s3-retry-probe.json) passes without a production change.
+
 ## Remaining gates
 
 - R2 [contract](r2-contract.md) and [checked handoff](r2-checked-handoff.md): boundedbackendreads, strict envelopes, immutable32-way chunkcatalog, v3manifest, boundedpages/follow, lazy renewable instance-owned publisher. Private Store layoutcomb/v3 separates refs/objects/intents/cache from R1comb/v2. Labels are local; Lease.writer stores instanceID with RefValue.epoch.
 - Stable append remains oneopaque1..512byte key +onepayload; no stablePending. HAMT and event publish in one manifestCAS. No physical stablegrouping for this gate.
-- Foundation append/read/follow stillUnsupported. Final immutablebinary backend acceptance must pass local,MinIO,S3 with forward/reverse submission, lostreply/retry, restart/freshcache, exactbytes and freshLoro replay. Preparedconfigs `/tmp/comb-foundation-gate-cj4oungg`; never print contents.
-- Fixture3real.fdnc changes/2offlinepeers yields2comments, projectionSHA b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a. Fixture verified; storage capture not yet successful. Loadscript `verification/bridge-load.mjs` awaits storage support.
+- The first immutable process capture passed local and MinIO in both submission orders, each with restart, fresh cache, exact bytes and fresh Loro replay. S3 returned backend_unavailable during concurrent append; the old acceptance caller stopped without retry. An independent same-binary S3 probe recovered with the identical key and bytes on attempt two, preserving three unique ranges and head 3. The final six-run gate waits for bounded caller recovery. Prepared configs remain private at `/tmp/comb-foundation-gate-cj4oungg`.
+- Fixture3real.fdnc changes/2offlinepeers yields2comments, projectionSHA b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a. Local and MinIO captures reconstruct the expected projection; the final all-backend receipt remains pending. Loadscript `verification/bridge-load.mjs` awaits storage support.
 - ObjectLog, deterministicdeliveryId and broader retention work remain later. Destructive collection disabled; MinIO ignored wrong-tokenDELETE, S3negativeprobe passed but publication races remain unresolved.
 
 ## Isolation

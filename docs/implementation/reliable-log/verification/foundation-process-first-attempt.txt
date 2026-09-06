@@ -1,0 +1,22 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: {"v":1,"id":"writer-1-5","ok":false,"error":{"code":"backend_unavailable","message":"append outcome may be committed; retry the same key and bytes"}}
+
+false !== true
+
+    at Bridge.ok (file:///private/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-foundation-root-review-emp85oy2/repo/scripts/foundation-bridge-client.mjs:99:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Promise.all (index 1)
+    at async Promise.all (index 0)
+    at async file:///private/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-foundation-root-review-emp85oy2/repo/scripts/foundation-bridge-acceptance.mjs:49:32 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.20.0

@@ -1,0 +1,36 @@
+{
+  "ok": true,
+  "log": "root-retry-probe-709de5a4-5fbc-44ed-ba18-f428879edcb3",
+  "events": [
+    {
+      "index": 1,
+      "attempt": 1,
+      "ok": true,
+      "first": "1",
+      "last": "1"
+    },
+    {
+      "index": 0,
+      "attempt": 1,
+      "ok": false,
+      "code": "backend_unavailable"
+    },
+    {
+      "index": 2,
+      "attempt": 1,
+      "ok": true,
+      "first": "2",
+      "last": "2"
+    },
+    {
+      "index": 0,
+      "attempt": 2,
+      "ok": true,
+      "first": "3",
+      "last": "3"
+    }
+  ],
+  "head": "3",
+  "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+  "scope": "Independent diagnostic probe; not the six-run acceptance receipt"
+}

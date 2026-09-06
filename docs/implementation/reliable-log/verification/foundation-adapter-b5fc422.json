@@ -1,0 +1,27 @@
+{
+  "source_sha": "b5fc4221f66abbff366f0e59211e7317af36d524",
+  "binary_sha256": "2d9dd5a5895e289e1ae4adfbb763457eb1a01a3e78cdb4f5f590985bb7318da1",
+  "test_source_sha256": "2c96abd9581c83427969245038204f649f185c5f1fe605eaeeef9833e2d74ff8",
+  "results": [
+    {
+      "name": "parent_eof_cancels_stalled_data_but_attempts_healthy_release",
+      "exit_code": 101,
+      "seconds": 4.064
+    },
+    {
+      "name": "parent_failed_opens_do_not_exhaust_log_capacity",
+      "exit_code": 101,
+      "seconds": 0.329
+    },
+    {
+      "name": "parent_one_failed_release_does_not_abort_a_healthy_sibling",
+      "exit_code": 101,
+      "seconds": 0.053
+    },
+    {
+      "name": "parent_steady_output_can_resume_after_five_seconds",
+      "exit_code": 101,
+      "seconds": 5.06
+    }
+  ]
+}

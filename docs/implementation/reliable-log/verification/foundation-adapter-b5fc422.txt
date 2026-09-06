@@ -1,0 +1,69 @@
+=== parent_eof_cancels_stalled_data_but_attempts_healthy_release ===
+
+running 1 test
+test parent_eof_cancels_stalled_data_but_attempts_healthy_release ... 
+thread 'parent_eof_cancels_stalled_data_but_attempts_healthy_release' (58950162) panicked at crates/combctl/tests/bridge_parent_review.rs:180:5:
+EOF skipped release even though only data upload was stalled
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    parent_eof_cancels_stalled_data_but_attempts_healthy_release
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.04s
+
+
+=== parent_failed_opens_do_not_exhaust_log_capacity ===
+
+running 1 test
+test parent_failed_opens_do_not_exhaust_log_capacity ... 
+thread 'parent_failed_opens_do_not_exhaust_log_capacity' (58950629) panicked at crates/combctl/tests/bridge_parent_review.rs:150:5:
+assertion `left == right` failed: failed initialization retained registry capacity: {"error":{"code":"busy","message":"process has reached its 256-log limit"},"id":"head","ok":false,"v":1}
+  left: Bool(false)
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    parent_failed_opens_do_not_exhaust_log_capacity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.30s
+
+
+=== parent_one_failed_release_does_not_abort_a_healthy_sibling ===
+
+running 1 test
+test parent_one_failed_release_does_not_abort_a_healthy_sibling ... 
+thread 'parent_one_failed_release_does_not_abort_a_healthy_sibling' (58950659) panicked at crates/combctl/tests/bridge_parent_review.rs:124:5:
+healthy B release was aborted by A failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    parent_one_failed_release_does_not_abort_a_healthy_sibling
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.03s
+
+
+=== parent_steady_output_can_resume_after_five_seconds ===
+
+running 1 test
+test parent_steady_output_can_resume_after_five_seconds ... 
+thread 'parent_steady_output_can_resume_after_five_seconds' (58950664) panicked at crates/combctl/tests/bridge_parent_review.rs:197:5:
+steady-state output reused the 4-second shutdown timer
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    parent_steady_output_can_resume_after_five_seconds
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 5.02s
+

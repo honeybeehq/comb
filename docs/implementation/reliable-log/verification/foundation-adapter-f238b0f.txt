@@ -1,0 +1,31 @@
+parent_eof_cancels_stalled_data_but_attempts_healthy_release
+
+running 1 test
+test parent_eof_cancels_stalled_data_but_attempts_healthy_release ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.52s
+
+
+parent_failed_opens_do_not_exhaust_log_capacity
+
+running 1 test
+test parent_failed_opens_do_not_exhaust_log_capacity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.04s
+
+
+parent_one_failed_release_does_not_abort_a_healthy_sibling
+
+running 1 test
+test parent_one_failed_release_does_not_abort_a_healthy_sibling ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.27s
+
+
+parent_steady_output_can_resume_after_five_seconds
+
+running 1 test
+test parent_steady_output_can_resume_after_five_seconds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 5.02s
+
