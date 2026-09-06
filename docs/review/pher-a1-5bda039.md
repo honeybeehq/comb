@@ -29,3 +29,17 @@ Both failures reproduced in 0.50 seconds after compilation. The follower cursor 
 ## Disposition at 535e574
 
 Startup implementation now matches verified `de71087`, apart from corrected comments. That correction is accepted. `daemon.rs` is byte-identical to `5bda039`, so neither reproduced timer defect was changed. The two timer regressions remain acceptance blockers. The owner has the executable test snippet and captured failures.
+
+## Disposition at cd1cb26
+
+Both original parent regressions now pass in the isolated source archive. The follower stops before a failed event, and failed disarm restores the in-memory timer list. Startup code is unchanged.
+
+A third parent regression fails: `review_timer_retry_does_not_repeat_successful_listener`. Register a plain `job.started` stream listener with limit 2, then an expect listener for the same subject. The matcher visits the plain listener first. Inject timer persistence failure. The plain listener delivers, the expect listener fails, and the follower correctly retains its old cursor. Clear the failure and retry. The plain listener delivers the same origin again and consumes its second limit. The test asserts the matcher order before injecting failure, so this is a deterministic partial-cascade case.
+
+`process_event` restarts its listener loop with no record of earlier successful effects. Fix the retry boundary by staging fallible timer changes before irreversible delivery effects, or by retaining completed listener progress. Cover multiple expect listeners as well: an earlier successful arm must not be repeated when a later arm fails. Do not infer exactly-once delivery from the global follower cursor alone.
+
+Two original parent tests passed and the new test failed. The test binary hash and captured output are in `verification/pher-timer-cd1cb26.json` and `verification/pher-timer-cd1cb26.txt`. The owner has the executable snippet. No source files in the active Pheromone worktree were edited.
+
+The isolated daemon rebuilt successfully from `cd1cb26`. Its immutable copy passed the real-process smoke test: 520 historical events, two live events, crash/restart, durable cursor recovery, and increasing sequence numbers. Evidence and the binary hash are in `verification/pher-daemon-smoke-cd1cb26.json`. The build emitted four warnings: an unused connector import, two unused connector fields, and unused test helper methods on SqliteLog. This happy-path result does not cover the failing partial cascade.
+
+`cda1f2b` corrects startup comments and review prose only. The pinned rusqlite default is 5000 ms. The earlier 40-process, 960-path startup result remains applicable; no repeat startup stress was run.
