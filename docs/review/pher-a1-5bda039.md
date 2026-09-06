@@ -61,3 +61,11 @@ Make held admission part of the retry-safe boundary. Deduplicating only an exist
 A separate source observation: the pending tier 3/4 loop still calls fallible `arm_expect_timer` after immediate listener delivery. The claim that every matching timer write precedes delivery is therefore too broad. This path was not exercised by the held-listener test.
 
 No new daemon smoke was run at this commit because the retry boundary still fails. The last measured daemon smoke remains `cd1cb26`; startup verification remains `de71087`.
+
+## Disposition at 3691c2a
+
+All six timer and cascade retry checks pass in the isolated source archive, including two expect listeners, held-event deduplication and catch-up release between a failed attempt and retry. Per-listener progress replaces the earlier staging approach. It is process-local: a crash after delivery but before the durable follower cursor can replay that event, consistent with the existing at-least-once contract. This is not a durable exactly-once delivery claim.
+
+One cleanup regression fails. A limit-1 listener delivers and removes itself, clearing its progress entry through `remove_sub`. `apply_to_listener` then unconditionally inserts that entry again. Repeated short-lived listeners therefore grow `applied_seqs` with retired IDs. `review_retired_listener_drops_applied_progress` proves the entry survives after its matcher is gone. Record progress only while the listener still exists after delivery; this also covers retirement on lag. The owner has the exact test snippet.
+
+The seven focused tests ran in0.74seconds: six passed and the cleanup check failed. Compilation passed with the two existing connector dead-code warnings. Binary hash and output are in `verification/pher-timer-3691c2a.json` and its text artifact. Final daemon rebuild waits for this cleanup; startup code and its earlier verification remain unchanged.
