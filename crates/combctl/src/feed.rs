@@ -343,6 +343,97 @@ pub struct CompleteLogManifest {
     pub ref_state: Option<RefValue>,
 }
 
+fn validate_complete_manifest(
+    resource: &str,
+    manifest: &CompleteLogManifest,
+) -> std::result::Result<(), CoreError> {
+    if manifest.header.resource != resource || manifest.log != resource {
+        return Err(CoreError::IntegrityError(format!(
+            "manifest log {} does not bind resource {resource}",
+            manifest.log
+        )));
+    }
+    if !matches!(manifest.retention, RetentionMode::Complete) {
+        return Err(CoreError::IntegrityError(
+            "complete feed requires complete retention".into(),
+        ));
+    }
+    if manifest.header.epoch != manifest.epoch {
+        return Err(CoreError::IntegrityError(
+            "manifest epoch disagrees with its commit header".into(),
+        ));
+    }
+    if manifest.trim_before_seq > manifest.head_seq {
+        return Err(CoreError::IntegrityError(
+            "trim_before_seq is past head_seq".into(),
+        ));
+    }
+    match &manifest.catalog {
+        CatalogState::Empty => {
+            if manifest.head_seq != 0 {
+                return Err(CoreError::IntegrityError(
+                    "empty catalog with nonzero head_seq".into(),
+                ));
+            }
+        }
+        CatalogState::Root { root } => {
+            if manifest.head_seq == 0 {
+                return Err(CoreError::IntegrityError(
+                    "catalog root with zero head_seq".into(),
+                ));
+            }
+            if root.first_seq == 0 || root.last_seq < root.first_seq || root.chunk_count == 0 {
+                return Err(CoreError::IntegrityError(
+                    "catalog root has an impossible span".into(),
+                ));
+            }
+            let expected_first = if manifest.trim_before_seq == 0 {
+                1
+            } else {
+                manifest
+                    .trim_before_seq
+                    .checked_add(1)
+                    .ok_or_else(|| CoreError::IntegrityError("trim_before_seq overflows".into()))?
+            };
+            if root.first_seq != expected_first {
+                return Err(CoreError::IntegrityError(
+                    "catalog first_seq disagrees with trim/head".into(),
+                ));
+            }
+            if root.last_seq != manifest.head_seq {
+                return Err(CoreError::IntegrityError(
+                    "catalog last_seq disagrees with manifest head_seq".into(),
+                ));
+            }
+            let span = root.last_seq - root.first_seq + 1;
+            if root.chunk_count > span {
+                return Err(CoreError::IntegrityError(
+                    "catalog chunk_count exceeds sequence span".into(),
+                ));
+            }
+        }
+    }
+    manifest.stable_index.validate()?;
+    hamt::check_root_against_head(
+        &manifest.stable_index,
+        IndexHead {
+            generation: manifest.header.generation,
+            head_seq: manifest.head_seq,
+        },
+    )?;
+    if manifest.head_seq == 0 && manifest.stable_index.entries != 0 {
+        return Err(CoreError::IntegrityError(
+            "empty feed has a nonempty stable index".into(),
+        ));
+    }
+    if manifest.head_seq != 0 && manifest.stable_index.entries == 0 {
+        return Err(CoreError::IntegrityError(
+            "published catalog has an empty stable index".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct CompleteFeed {
     store: Arc<Store>,
     logical: String,
@@ -453,35 +544,8 @@ impl CompleteFeed {
         }
         let manifest: CompleteLogManifest = serde_json::from_value(raw)
             .map_err(|e| OpenLogError::Integrity(LogIntegrityError(format!("v3 manifest: {e}"))))?;
-        if manifest.header.resource != self.resource || manifest.log != self.resource {
-            return Err(OpenLogError::Integrity(LogIntegrityError(format!(
-                "manifest log {} does not bind resource {}",
-                manifest.log, self.resource
-            ))));
-        }
-        if !matches!(manifest.retention, RetentionMode::Complete) {
-            return Err(OpenLogError::Integrity(LogIntegrityError(
-                "complete feed requires complete retention".into(),
-            )));
-        }
-        if manifest.header.epoch != manifest.epoch {
-            return Err(OpenLogError::Integrity(LogIntegrityError(
-                "manifest epoch disagrees with its commit header".into(),
-            )));
-        }
-        match &manifest.catalog {
-            CatalogState::Empty if manifest.head_seq != 0 => {
-                return Err(OpenLogError::Integrity(LogIntegrityError(
-                    "empty catalog with nonzero head_seq".into(),
-                )));
-            }
-            CatalogState::Root { root } if root.last_seq != manifest.head_seq => {
-                return Err(OpenLogError::Integrity(LogIntegrityError(
-                    "catalog last_seq disagrees with manifest head_seq".into(),
-                )));
-            }
-            _ => {}
-        }
+        validate_complete_manifest(&self.resource, &manifest)
+            .map_err(|e| OpenLogError::Integrity(LogIntegrityError(e.to_string())))?;
         Ok(manifest)
     }
 
@@ -1160,6 +1224,58 @@ impl WriterSession {
         }));
     }
 
+    async fn lookup_committed(
+        &self,
+        snapshot: &HeadSnapshot,
+        key: &StableKey,
+        payload_hash: &Digest,
+        call: &CallContext,
+    ) -> Result<Option<StableAppendReceipt>, StableAppendError> {
+        let Some(digest) = &snapshot.value.target else {
+            self.feed
+                .published_or_empty(&snapshot.value, call)
+                .await
+                .map_err(open_to_append)?;
+            return Ok(None);
+        };
+        let manifest = self
+            .feed
+            .load_manifest(digest, call)
+            .await
+            .map_err(open_to_append)?;
+        let found = timed_read(
+            call,
+            hamt::lookup(
+                &self.feed.store,
+                &manifest.stable_index,
+                key,
+                &self.feed.logical,
+                IndexHead {
+                    generation: snapshot.value.generation,
+                    head_seq: manifest.head_seq,
+                },
+            ),
+            "stable-index",
+        )
+        .await
+        .map_err(read_to_append)?;
+        match found {
+            Lookup::Found(e) if e.payload_hash == *payload_hash => Ok(Some(StableAppendReceipt {
+                payload_hash: payload_hash.clone(),
+                range: AppendRange {
+                    first: e.first,
+                    last: e.last,
+                },
+                generation: e.generation,
+            })),
+            Lookup::Found(e) => Err(StableAppendError::StableKeyConflict {
+                existing: e.payload_hash,
+                supplied: payload_hash.clone(),
+            }),
+            Lookup::Absent => Ok(None),
+        }
+    }
+
     pub async fn append_stable(
         &self,
         key: StableKey,
@@ -1191,68 +1307,11 @@ impl WriterSession {
                     value: RefValue::new(&self.feed.store.tenant, &self.feed.resource),
                     version: None,
                 });
-            if let Some(digest) = &snapshot.value.target {
-                let manifest =
-                    self.feed
-                        .load_manifest(digest, call)
-                        .await
-                        .map_err(|e| match e {
-                            OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
-                            OpenLogError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
-                            OpenLogError::Cancelled => StableAppendError::Cancelled,
-                            _ => StableAppendError::Unavailable,
-                        })?;
-                let found = timed_read(
-                    call,
-                    hamt::lookup(
-                        &self.feed.store,
-                        &manifest.stable_index,
-                        &key,
-                        &self.feed.logical,
-                        IndexHead {
-                            generation: snapshot.value.generation,
-                            head_seq: manifest.head_seq,
-                        },
-                    ),
-                    "stable-index",
-                )
-                .await
-                .map_err(|e| match e {
-                    ReadError::Integrity(i) => StableAppendError::Integrity(i),
-                    ReadError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
-                    ReadError::Cancelled => StableAppendError::Cancelled,
-                    ReadError::Unavailable { .. } => StableAppendError::Unavailable,
-                    other => StableAppendError::Integrity(LogIntegrityError(format!("{other:?}"))),
-                })?;
-                match found {
-                    Lookup::Found(e) if e.payload_hash == payload_hash => {
-                        return Ok(StableAppendReceipt {
-                            payload_hash,
-                            range: AppendRange {
-                                first: e.first,
-                                last: e.last,
-                            },
-                            generation: e.generation,
-                        });
-                    }
-                    Lookup::Found(e) => {
-                        return Err(StableAppendError::StableKeyConflict {
-                            existing: e.payload_hash,
-                            supplied: payload_hash,
-                        });
-                    }
-                    Lookup::Absent => {}
-                }
-            } else {
-                self.feed
-                    .published_or_empty(&snapshot.value, call)
-                    .await
-                    .map_err(|e| match e {
-                        OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
-                        OpenLogError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
-                        OpenLogError::Cancelled => StableAppendError::Cancelled,
-                        _ => StableAppendError::Unavailable,
-                    })?;
+            if let Some(receipt) = self
+                .lookup_committed(&snapshot, &key, &payload_hash, call)
+                .await?
+            {
+                return Ok(receipt);
             }
             let epoch = self.acquire(call).await.map_err(StableAppendError::Lease)?;
             let snapshot = timed_lease(call, self.feed.store.read_head(&self.feed.resource))
@@ -1269,6 +1328,12 @@ impl WriterSession {
                 return Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
                     cause: SessionLoss::OwnerChanged,
                 }));
+            }
+            if let Some(receipt) = self
+                .lookup_committed(&snapshot, &key, &payload_hash, call)
+                .await?
+            {
+                return Ok(receipt);
             }
             match timed_cas(
                 call,
@@ -1463,19 +1528,7 @@ impl RefMutationPlan for CompleteAppendPlan {
                 .get_blob_limited(current.target.as_ref().unwrap(), spec)
                 .await?;
             let m: CompleteLogManifest = serde_json::from_slice(&payload)?;
-            if m.log != self.resource || m.header.resource != self.resource {
-                return Err(CoreError::IntegrityError(format!(
-                    "manifest log {} does not bind {}",
-                    m.log, self.resource
-                ))
-                .into());
-            }
-            if !matches!(m.retention, RetentionMode::Complete) {
-                return Err(CoreError::IntegrityError(
-                    "complete feed requires complete retention".into(),
-                )
-                .into());
-            }
+            validate_complete_manifest(&self.resource, &m)?;
             (m.catalog, m.stable_index, m.head_seq)
         };
         let seq = head_seq
@@ -1750,6 +1803,25 @@ fn lease_from_anyhow(e: anyhow::Error) -> LeaseError {
             LeaseError::LeaseHeld { owner, until }
         }
         _ => LeaseError::Unavailable,
+    }
+}
+
+fn open_to_append(e: OpenLogError) -> StableAppendError {
+    match e {
+        OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
+        OpenLogError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+        OpenLogError::Cancelled => StableAppendError::Cancelled,
+        _ => StableAppendError::Unavailable,
+    }
+}
+
+fn read_to_append(e: ReadError) -> StableAppendError {
+    match e {
+        ReadError::Integrity(i) => StableAppendError::Integrity(i),
+        ReadError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+        ReadError::Cancelled => StableAppendError::Cancelled,
+        ReadError::Unavailable { .. } => StableAppendError::Unavailable,
+        other => StableAppendError::Integrity(LogIntegrityError(format!("{other:?}"))),
     }
 }
 

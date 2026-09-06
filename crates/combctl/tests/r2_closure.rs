@@ -507,3 +507,41 @@ async fn review_manifest_head_cannot_hide_catalog_events() {
         "head concealed retained catalog events: {got:?}"
     );
 }
+
+#[tokio::test]
+async fn review_concurrent_same_key_returns_original_receipt() {
+    let (feed, _) = setup().await;
+    let writer = Arc::new(
+        feed.writer_session(
+            WriterLabel::try_from("same").unwrap(),
+            LeasePolicy::bridge_default(),
+        )
+        .unwrap(),
+    );
+    writer.ready(&call()).await.unwrap();
+    let key = StableKey::try_from_canonical(b"one".to_vec()).unwrap();
+    let payload = Bytes::from_static(b"payload");
+    let a = {
+        let writer = writer.clone();
+        let key = key.clone();
+        let payload = payload.clone();
+        tokio::spawn(async move { writer.append_stable(key, payload, &call()).await })
+    };
+    let b = {
+        let writer = writer.clone();
+        let key = key.clone();
+        let payload = payload.clone();
+        tokio::spawn(async move { writer.append_stable(key, payload, &call()).await })
+    };
+    let ra = a.await.unwrap().expect("first concurrent same-key append");
+    let rb = b.await.unwrap().expect("second concurrent same-key append");
+    assert_eq!(ra.range.first, rb.range.first);
+    assert_eq!(ra.range.last, rb.range.last);
+    assert_eq!(ra.payload_hash, rb.payload_hash);
+    let page = feed
+        .read_page(Cursor::first(0), limits(), &call())
+        .await
+        .expect("one committed event");
+    assert_eq!(page.events.len(), 1);
+    assert!(page.at_head);
+}
