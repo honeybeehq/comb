@@ -404,7 +404,9 @@ fn parse_follow(id: String, value: &Value, limits: &Limits) -> Result<Request, R
     let timeout_ms = parse_optional_u64(&id, value, "timeout_ms")?;
     let max_events = parse_optional_u64(&id, value, "max_events")?;
     let max_bytes = parse_optional_u64(&id, value, "max_bytes")?;
-    reject_over_limit(&id, "timeout_ms", timeout_ms, limits.max_follow_timeout_ms)?;
+    if timeout_ms.is_some_and(|timeout| timeout > limits.max_follow_timeout_ms) {
+        return Err(Response::invalid(&id, "timeout_ms exceeds limit"));
+    }
     reject_over_limit(&id, "max_events", max_events, limits.max_read_events as u64)?;
     reject_over_limit(&id, "max_bytes", max_bytes, limits.max_read_bytes as u64)?;
     Ok(Request::Follow {

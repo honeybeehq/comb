@@ -107,16 +107,24 @@ impl Bridge {
                     trim_before: seq_string(0),
                 },
             ),
-            Ok(Some((_, manifest))) => Response::ok(
-                id,
-                "head",
-                OkBody::Head {
-                    log,
-                    head: seq_string(manifest.head_seq),
-                    cursor: seq_string(manifest.head_seq + 1),
-                    trim_before: seq_string(manifest.trim_before_seq),
-                },
-            ),
+            Ok(Some((_, manifest))) => {
+                let Some(cursor) = manifest.head_seq.checked_add(1) else {
+                    return map_log_error(
+                        id,
+                        anyhow::anyhow!("log head has no representable next cursor"),
+                    );
+                };
+                Response::ok(
+                    id,
+                    "head",
+                    OkBody::Head {
+                        log,
+                        head: seq_string(manifest.head_seq),
+                        cursor: seq_string(cursor),
+                        trim_before: seq_string(manifest.trim_before_seq),
+                    },
+                )
+            }
             Err(e) => map_log_error(id, e),
         }
     }

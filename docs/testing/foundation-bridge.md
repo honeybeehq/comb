@@ -81,6 +81,9 @@ Invalid JSON or a frame too large to parse safely can have an empty response ID.
 the encoded line limit, which includes JSON fields and hex expansion. Both request
 and response lines must fit the wire limit. Page construction must respect the wire
 budget before emitting a cursor that advances past events.
+The default wire limit is 1 MiB. Raw append and read limits are 480 KiB, leaving
+64 KiB after hex expansion for JSON fields and up to 256 event records. The output
+transport also checks the final encoded frame.
 
 `idempotency_key` contains 1 to 512 opaque bytes, encoded as 2 to 1024 hex characters.
 Uppercase hex is accepted and normalized to lowercase. `max_idempotency_key_len`

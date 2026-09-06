@@ -15,10 +15,11 @@ not establish shared Log correctness or Foundation integration readiness.
 | The acceptance client forgot terminal errors when no request was pending | Late invalid stdout could still produce a success receipt | `d261280` retains terminal errors and requires clean final process closure |
 | A reused result directory could retain an older success receipt | A failed run could appear successful | `d261280` refuses an existing output directory before spawning |
 
-Additional baseline issues were sent to the bridge owner for the follow-up:
-opaque hex key validation with a 512-byte bound, unique default process identity,
-raw byte budgets that fit encoded frames, checked head cursor arithmetic, and
-acceptance of zero as the non-blocking follow timeout.
+`ec4fbd9` adds opaque hex key validation with a 512-byte bound and a unique default
+process identity. The focused follow-up reserves 64 KiB of the encoded frame for
+metadata, checks head cursor arithmetic, and accepts zero as the non-blocking follow
+timeout. Count and byte page limits remain positive. Tests serialize maximum-size
+requests and pages, and exercise an overflowing head through the actual handler.
 
 ## Verification
 
@@ -31,6 +32,10 @@ private Cargo target. The acceptance runner also passes `node --check`.
 A third passing process test sends a line larger than 1 MiB across multiple input
 buffers, followed by a valid hello. Both replies arrive with their request IDs;
 the bridge preserves the next request while draining the oversized line.
+
+Final private-target verification passes: binary unit target 1, protocol target 21,
+transport target 5, and Foundation process target 3. The path-included test modules
+produce unused-code warnings; there are no build errors or failing tests.
 
 Transport success is separate from storage acceptance. The bridge advertises
 `durable_idempotency: false` and `bounded_memory_read: false`; append, read, and

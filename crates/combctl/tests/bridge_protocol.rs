@@ -59,6 +59,96 @@ fn hello_and_unknown_version() {
 }
 
 #[test]
+fn zero_timeout_is_a_poll_but_page_limits_stay_positive() {
+    parse(json!({"v":1,"id":"f","op":"follow","log":"doc","cursor":"1","timeout_ms":0})).unwrap();
+    for field in ["max_events", "max_bytes"] {
+        let mut request =
+            json!({"v":1,"id":"f","op":"follow","log":"doc","cursor":"1","timeout_ms":0});
+        request[field] = json!(0);
+        assert_eq!(parse_err(request)["error"]["code"], "invalid_request");
+    }
+    assert_eq!(
+        parse_err(
+            json!({"v":1,"id":"f","op":"follow","log":"doc","cursor":"1","timeout_ms":30001})
+        )["error"]["code"],
+        "invalid_request"
+    );
+}
+
+#[test]
+fn maximum_raw_append_fits_wire_with_maximum_identity_fields() {
+    let limits = limits();
+    let mut request = json!({
+        "v":1,"id":"\"".repeat(limits.max_id_len),"op":"append",
+        "log":"x".repeat(limits.max_log_name_len),
+        "idempotency_key":"ab".repeat(limits.max_idempotency_key_len / 2),
+        "payload_hex":"ff".repeat(limits.max_append_bytes)
+    });
+    assert!(serde_json::to_vec(&request).unwrap().len() <= limits.max_frame_bytes);
+    parse(request.clone()).unwrap();
+    request["payload_hex"] = json!("ff".repeat(limits.max_append_bytes + 1));
+    assert_eq!(parse_err(request)["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn maximum_raw_page_leaves_space_for_all_event_metadata() {
+    use bridge::protocol::{OkBody, WireEvent};
+    let limits = limits();
+    let events = (0..limits.max_read_events)
+        .map(|index| WireEvent {
+            seq: u64::MAX.to_string(),
+            at: "+262142-12-31T23:59:59.999999999+23:59".into(),
+            payload_hex: "ff".repeat(if index == 0 {
+                limits.max_read_bytes - (limits.max_read_events - 1)
+            } else {
+                1
+            }),
+        })
+        .collect();
+    let response = Response::ok(
+        "\"".repeat(limits.max_id_len),
+        "follow",
+        OkBody::Page {
+            log: "x".repeat(limits.max_log_name_len),
+            events,
+            next_cursor: u64::MAX.to_string(),
+            at_head: false,
+            timed_out: Some(false),
+        },
+    );
+    assert!(response.to_jsonl().len() <= limits.max_frame_bytes);
+}
+
+#[tokio::test]
+async fn head_without_representable_next_cursor_returns_error() {
+    let store = Store {
+        backend: Arc::new(MemoryBackend::new()),
+        tenant: "org_head_overflow".into(),
+        key: DigestKey::from_bytes([7; 32]),
+        cache_dir: None,
+    };
+    let manifest = json!({
+        "schema":"comb.log.partition-manifest/v1", "log":"log/doc/p0",
+        "epoch":0, "head_seq":u64::MAX, "chunks":[], "segments":[], "trim_before_seq":0,
+    });
+    let (digest, _) = store
+        .put_blob(serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    store.set_target("log/doc/p0", digest, None).await.unwrap();
+    let bridge = Bridge::new(store, "test-writer".into(), 60, limits());
+    let response = rpc(
+        &bridge,
+        json!({"v":1,"id":"head-overflow","op":"head","log":"doc"}),
+    )
+    .await;
+    assert_eq!(response["id"], "head-overflow");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "backend_unavailable");
+    assert!(response.get("cursor").is_none());
+}
+
+#[test]
 fn unknown_op_is_invalid_request() {
     let err = parse_err(json!({"v":1,"id":"x","op":"trim"}));
     assert_eq!(err["id"], "x");

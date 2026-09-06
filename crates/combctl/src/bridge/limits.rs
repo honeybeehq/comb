@@ -26,9 +26,11 @@ impl Default for Limits {
             max_concurrent_requests: 32,
             max_queued_output: 64,
             max_append_events: 1,
-            max_append_bytes: 1_048_576,
+            // Hex uses twice the raw bytes. Leave 64 KiB for page metadata,
+            // including 256 event positions/timestamps and escaped request IDs.
+            max_append_bytes: 480 * 1024,
             max_read_events: 256,
-            max_read_bytes: 1_048_576,
+            max_read_bytes: 480 * 1024,
             max_follow_timeout_ms: 30_000,
             max_log_name_len: 128,
             max_id_len: 128,
