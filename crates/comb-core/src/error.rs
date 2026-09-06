@@ -45,6 +45,9 @@ pub enum CoreError {
     #[error("lease held by {holder} until {until}")]
     LeaseHeld { holder: String, until: String },
 
+    #[error("lease expired")]
+    LeaseExpired,
+
     #[error("backend unavailable: {0}")]
     BackendUnavailable(String),
 

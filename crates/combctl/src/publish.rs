@@ -857,7 +857,7 @@ impl Store {
         let cas_now = self.clock().now();
         if let Some(lease) = next.lease.as_ref() {
             if lease.lease_until <= cas_now {
-                return Err(CoreError::Rejected("lease expired".into()).into());
+                return Err(CoreError::LeaseExpired.into());
             }
             next.updated_at = cas_now;
         } else {
@@ -1076,7 +1076,7 @@ impl Store {
         let cas_now = self.clock().now();
         if let Some(lease) = next.lease.as_ref() {
             if lease.lease_until <= cas_now {
-                return Err(CoreError::Rejected("lease expired".into()).into());
+                return Err(CoreError::LeaseExpired.into());
             }
             next.updated_at = cas_now;
         } else {
@@ -1388,11 +1388,11 @@ impl Store {
                 .into());
             }
             if !snapshot.value.lease_live(now) {
-                return Err(CoreError::Rejected("lease expired".into()).into());
+                return Err(CoreError::LeaseExpired.into());
             }
             let cas_now = self.clock().now();
             if !snapshot.value.lease_live(cas_now) {
-                return Err(CoreError::Rejected("lease expired".into()).into());
+                return Err(CoreError::LeaseExpired.into());
             }
             let mut next = snapshot.value.clone();
             next.lease = Some(comb_core::Lease {

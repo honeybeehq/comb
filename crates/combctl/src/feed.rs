@@ -1281,13 +1281,8 @@ impl WriterSession {
                             Some(CoreError::Fenced { live, .. }) => {
                                 SessionLoss::Fenced { live_epoch: *live }
                             }
-                            Some(CoreError::Rejected(m)) if m.contains("expired") => {
-                                SessionLoss::LeaseExpired
-                            }
+                            Some(CoreError::LeaseExpired) => SessionLoss::LeaseExpired,
                             Some(CoreError::LeaseHeld { .. }) => SessionLoss::OwnerChanged,
-                            Some(CoreError::Rejected(m)) if m.contains("owner") => {
-                                SessionLoss::OwnerChanged
-                            }
                             _ => SessionLoss::RenewalUncertain,
                         };
                         let _ = state.send(WriterState::Lost {
@@ -1518,11 +1513,9 @@ fn cas_from_anyhow(e: anyhow::Error) -> StableAppendError {
             session_epoch: *caller,
             live_epoch: *live,
         }),
-        Some(CoreError::Rejected(m)) if m.contains("expired") => {
-            StableAppendError::Lease(LeaseError::ReacquireRequired {
-                cause: SessionLoss::LeaseExpired,
-            })
-        }
+        Some(CoreError::LeaseExpired) => StableAppendError::Lease(LeaseError::ReacquireRequired {
+            cause: SessionLoss::LeaseExpired,
+        }),
         Some(CoreError::LeaseHeld { holder, until }) => {
             let owner = WriterInstanceId::try_from_canonical(holder)
                 .unwrap_or_else(WriterInstanceId::generate);
@@ -1887,6 +1880,9 @@ fn lease_from_anyhow(e: anyhow::Error) -> LeaseError {
                 .unwrap_or_else(|_| Utc::now());
             LeaseError::LeaseHeld { owner, until }
         }
+        Some(CoreError::LeaseExpired) => LeaseError::ReacquireRequired {
+            cause: SessionLoss::LeaseExpired,
+        },
         _ => LeaseError::Unavailable,
     }
 }
