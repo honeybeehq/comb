@@ -27,3 +27,4 @@ toml = "0.8"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 tempfile = "3"
+tokio-util = { version = "0.7", features = ["rt"] }

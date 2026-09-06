@@ -7,6 +7,7 @@
 
 use crate::backend::{ObjectBackend, Version};
 use comb_core::error::CoreError;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -175,6 +176,47 @@ pub async fn run(backend: Arc<dyn ObjectBackend>, key_prefix: &str) -> Vec<Check
         });
     }
 
+    // 10. get_limited accepts an object at the exact cap and rejects one
+    //     extra byte as ObjectTooLarge, never a truncated body.
+    {
+        let key = track(k("limited-exact"));
+        let body = vec![0xab; 32];
+        backend.put_create(&key, &body).await.ok();
+        let exact = NonZeroU64::new(32).expect("nonzero");
+        let under = NonZeroU64::new(31).expect("nonzero");
+        let got = backend.get_limited(&key, exact).await;
+        let over = backend.get_limited(&key, under).await;
+        let full = backend.get(&key).await;
+        let passed = matches!(&got, Ok((bytes, _)) if bytes == &body)
+            && matches!(
+                &over,
+                Err(CoreError::ObjectTooLarge {
+                    limit: 31,
+                    actual: Some(32),
+                    ..
+                })
+            )
+            && matches!(&full, Ok((bytes, _)) if bytes == &body);
+        results.push(CheckResult {
+            name: "get_limited exact cap; one extra byte rejected",
+            passed,
+            detail: format!("exact={got:?} over={over:?}"),
+        });
+    }
+
+    // 11. missing key through get_limited is confirmed NotFound.
+    {
+        let key = k("limited-missing");
+        let res = backend
+            .get_limited(&key, NonZeroU64::new(8).expect("nonzero"))
+            .await;
+        results.push(CheckResult {
+            name: "get_limited missing key is NotFound",
+            passed: matches!(res, Err(CoreError::NotFound(_))),
+            detail: format!("{res:?}"),
+        });
+    }
+
     // Cleanup.
     for key in keys_used {
         backend.delete(&key).await.ok();
@@ -186,8 +228,11 @@ pub async fn run(backend: Arc<dyn ObjectBackend>, key_prefix: &str) -> Vec<Check
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failpoint::{CountingBackend, FailpointBackend};
+    use crate::fault::FaultBackend;
     use crate::local::LocalBackend;
     use crate::memory::MemoryBackend;
+    use crate::s3::S3Backend;
 
     #[tokio::test]
     async fn memory_backend_conforms() {
@@ -199,6 +244,79 @@ mod tests {
     async fn local_backend_conforms() {
         let dir = tempfile::tempdir().unwrap();
         let results = run(Arc::new(LocalBackend::new(dir.path())), "conformance-test").await;
+        assert!(results.iter().all(|r| r.passed), "{results:#?}");
+    }
+
+    #[tokio::test]
+    async fn wrappers_preserve_get_limited_cap_and_error_class() {
+        let mem = Arc::new(MemoryBackend::new());
+        for (name, backend) in [
+            (
+                "fault",
+                Arc::new(FaultBackend::new(mem.clone(), 1, 0.0, 0.0)) as Arc<dyn ObjectBackend>,
+            ),
+            (
+                "failpoint",
+                Arc::new(FailpointBackend::new(mem.clone())) as Arc<dyn ObjectBackend>,
+            ),
+            (
+                "counting",
+                Arc::new(CountingBackend::new(mem.clone())) as Arc<dyn ObjectBackend>,
+            ),
+        ] {
+            let results = run(backend, &format!("wrap-{name}")).await;
+            assert!(
+                results.iter().all(|r| r.passed),
+                "{name} wrapper: {results:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failpoint_get_limited_transient_is_not_not_found() {
+        let mem = Arc::new(MemoryBackend::new());
+        mem.put_create("k/present", b"abcd").await.unwrap();
+        let fp = FailpointBackend::drop_next_get_limited_request(mem.clone(), "k/present");
+        let cap = NonZeroU64::new(16).unwrap();
+        match fp.get_limited("k/present", cap).await {
+            Err(CoreError::BackendUnavailable(_)) => {}
+            other => panic!("injected failure must not be NotFound, got {other:?}"),
+        }
+        match fp.get_limited("k/absent", cap).await {
+            Err(CoreError::NotFound(_)) => {}
+            other => panic!("missing key must stay NotFound, got {other:?}"),
+        }
+        let io = FailpointBackend::io_on_next_get_limited(mem.clone(), "k/present");
+        match io.get_limited("k/present", cap).await {
+            Err(CoreError::Io(_)) => {}
+            other => panic!("injected io must stay Io, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn s3_get_limited_conforms_if_configured() {
+        let Ok(bucket) = std::env::var("COMB_S3_BUCKET") else {
+            return;
+        };
+        let region = std::env::var("COMB_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let prefix = format!(
+            "comb-r2-limited-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let endpoint = std::env::var("COMB_S3_ENDPOINT").ok();
+        let profile = std::env::var("AWS_PROFILE").ok();
+        let backend = S3Backend::connect(
+            profile.as_deref(),
+            Some(&region),
+            &bucket,
+            &prefix,
+            endpoint.as_deref(),
+        )
+        .await;
+        let results = run(Arc::new(backend), "conformance-test").await;
         assert!(results.iter().all(|r| r.passed), "{results:#?}");
     }
 }

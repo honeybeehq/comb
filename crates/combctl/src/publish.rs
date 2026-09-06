@@ -3,7 +3,7 @@
 //! Recovery truth is the immutable commit chain linked from the ref. The
 //! per-identity intent is a CAS-guarded attempt record and a result cache.
 
-use crate::store::Store;
+use crate::store::{KeyLayout, Store};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use comb_core::commit::{
@@ -12,14 +12,29 @@ use comb_core::commit::{
 };
 use comb_core::error::CoreError;
 use comb_core::operation::{Material, OpIdentity, OperationPolicy};
-use comb_core::{Digest, Envelope, ObjectKind, RefValue};
+use comb_core::{
+    Digest, Envelope, EnvelopeReadSpec, ObjectKind, RefValue, MAX_MANIFEST_OBJECT_BYTES,
+    MAX_REF_OBJECT_BYTES,
+};
 use comb_object::Version;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::num::NonZeroU64;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub const NS_V2: &str = "comb/v2";
+pub const NS_V3: &str = "comb/v3";
 pub const NS_V1: &str = "comb/v1";
-const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
+pub(crate) const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
+pub(crate) const LOG_MANIFEST_SCHEMA_V3: &str = "comb.log.partition-manifest/v3";
+pub(crate) const LOG_MANIFEST_CARRIERS: &[&str] = &[LOG_MANIFEST_SCHEMA, LOG_MANIFEST_SCHEMA_V3];
+const COMMIT_VIEW_ENVELOPES: &[&str] = &[
+    COMMIT_SCHEMA,
+    LOG_MANIFEST_SCHEMA,
+    LOG_MANIFEST_SCHEMA_V3,
+    "comb.object/v1",
+];
 const MAX_PUBLISH_ATTEMPTS: u32 = 128;
 const MAX_SEEK_HOPS: u32 = 10_000;
 
@@ -63,6 +78,74 @@ pub(crate) struct PreparedMutation<R> {
     /// Other identities in this CAS. Their intents are moved to the same
     /// base before the ref write so a crash cannot re-append them.
     pub companions: Vec<Companion>,
+    /// When set, the shared engine rechecks this live lease immediately
+    /// before CAS without rewriting persisted ref_state timestamps.
+    pub live_lease: Option<LiveLeaseGuard>,
+}
+
+pub(crate) struct LiveLeaseGuard {
+    pub writer: String,
+    pub epoch: u64,
+    pub cancel: CancellationToken,
+}
+
+fn enforce_live_lease(
+    guard: &Option<LiveLeaseGuard>,
+    next: &RefValue,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let Some(g) = guard else {
+        return Ok(());
+    };
+    if g.cancel.is_cancelled() {
+        return Err(CoreError::LeaseExpired.into());
+    }
+    let Some(lease) = next.lease.as_ref() else {
+        return Err(CoreError::LeaseExpired.into());
+    };
+    if lease.writer != g.writer || next.epoch != g.epoch {
+        return Err(CoreError::LeaseHeld {
+            holder: lease.writer.clone(),
+            until: lease.lease_until.to_rfc3339(),
+        }
+        .into());
+    }
+    if lease.lease_until <= now {
+        return Err(CoreError::LeaseExpired.into());
+    }
+    Ok(())
+}
+
+impl Store {
+    async fn publication_io<T>(
+        &self,
+        guard: &Option<LiveLeaseGuard>,
+        lease_src: &RefValue,
+        fut: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let Some(g) = guard else {
+            return fut.await;
+        };
+        if g.cancel.is_cancelled() {
+            return Err(CoreError::LeaseExpired.into());
+        }
+        let now = self.clock().now();
+        let Some(lease) = lease_src.lease.as_ref() else {
+            return Err(CoreError::LeaseExpired.into());
+        };
+        if lease.lease_until <= now {
+            return Err(CoreError::LeaseExpired.into());
+        }
+        let wait = (lease.lease_until - now)
+            .to_std()
+            .unwrap_or(Duration::from_millis(1));
+        tokio::select! {
+            biased;
+            _ = g.cancel.cancelled() => Err(CoreError::LeaseExpired.into()),
+            _ = tokio::time::sleep(wait) => Err(CoreError::LeaseExpired.into()),
+            r = fut => r,
+        }
+    }
 }
 
 pub(crate) struct PrepareCtx<'a> {
@@ -97,6 +180,9 @@ pub(crate) trait RefMutationPlan: Send + Sync {
 
     fn resource(&self) -> &str;
     fn material(&self) -> Material;
+    fn live_lease(&self) -> Option<LiveLeaseGuard> {
+        None
+    }
     fn prepare(
         &self,
         ctx: PrepareCtx<'_>,
@@ -118,7 +204,8 @@ pub(crate) struct CommitView {
 impl Store {
     pub fn object_key(&self, digest: &Digest) -> String {
         format!(
-            "{NS_V2}/tenants/{}/objects/b3k/{}/{}",
+            "{}/tenants/{}/objects/b3k/{}/{}",
+            self.layout.prefix(),
             self.tenant,
             digest.key_prefix(),
             digest.hex()
@@ -126,7 +213,11 @@ impl Store {
     }
 
     pub fn ref_key(&self, name: &str) -> String {
-        format!("{NS_V2}/tenants/{}/refs/{name}.json", self.tenant)
+        format!(
+            "{}/tenants/{}/refs/{name}.json",
+            self.layout.prefix(),
+            self.tenant
+        )
     }
 
     pub fn v1_ref_key(&self, name: &str) -> String {
@@ -136,14 +227,18 @@ impl Store {
     pub fn intent_key(&self, identity: &OpIdentity) -> String {
         match identity {
             OpIdentity::Generic(_) => format!(
-                "{NS_V2}/tenants/{}/ops/{}/{}.json",
+                "{}/tenants/{}/ops/{}/{}.json",
+                self.layout.prefix(),
                 self.tenant,
                 identity.shard(),
                 identity.canonical()
             ),
-            OpIdentity::Stable(k) => {
-                format!("{NS_V2}/tenants/{}/stable/{}.json", self.tenant, k.to_hex())
-            }
+            OpIdentity::Stable(k) => format!(
+                "{}/tenants/{}/stable/{}.json",
+                self.layout.prefix(),
+                self.tenant,
+                k.to_hex()
+            ),
         }
     }
 
@@ -158,8 +253,16 @@ impl Store {
     }
 
     pub async fn read_head(&self, name: &str) -> Result<Option<HeadSnapshot>> {
-        self.reject_v1(name).await?;
-        match self.backend.get(&self.ref_key(name)).await {
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(name).await?;
+        }
+        let cap = NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero");
+        let fetched = if self.layout == KeyLayout::V2 {
+            self.backend.get(&self.ref_key(name)).await
+        } else {
+            self.backend.get_limited(&self.ref_key(name), cap).await
+        };
+        match fetched {
             Ok((bytes, version)) => {
                 let value: RefValue = serde_json::from_slice(&bytes)
                     .map_err(|e| CoreError::InvalidFormat(format!("ref {name}: {e}")))?;
@@ -200,7 +303,9 @@ impl Store {
         identity: OpIdentity,
         plan: P,
     ) -> Result<Published<P::Outcome>> {
-        self.reject_v1(plan.resource()).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(plan.resource()).await?;
+        }
         let request = plan
             .material()
             .hash(&self.key, &self.tenant, plan.resource());
@@ -525,7 +630,18 @@ impl Store {
         &self,
         identity: &OpIdentity,
     ) -> Result<Option<(OpIntent, Option<Version>)>> {
-        match self.backend.get(&self.intent_key(identity)).await {
+        let intent_key = self.intent_key(identity);
+        let fetched = if self.layout == KeyLayout::V2 {
+            self.backend.get(&intent_key).await
+        } else {
+            self.backend
+                .get_limited(
+                    &intent_key,
+                    NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero"),
+                )
+                .await
+        };
+        match fetched {
             Ok((bytes, version)) => {
                 let intent: OpIntent = serde_json::from_slice(&bytes).map_err(|e| {
                     CoreError::RecoveryFailed(format!(
@@ -677,7 +793,10 @@ impl Store {
             skip,
             now,
         };
-        let prepared = plan.prepare(ctx).await?;
+        let guard = plan.live_lease();
+        let prepared = self
+            .publication_io(&guard, &snapshot.value, plan.prepare(ctx))
+            .await?;
         if prepared.next.generation != generation {
             return Err(anyhow!(
                 "plan set generation {} want {generation}",
@@ -779,14 +898,17 @@ impl Store {
         }
 
         for (digest, bytes, _, _) in &uploaded {
-            match self
-                .backend
-                .put_create(&self.object_key(digest), bytes)
-                .await
-            {
-                Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
+            self.publication_io(&guard, &prepared.next, async {
+                match self
+                    .backend
+                    .put_create(&self.object_key(digest), bytes)
+                    .await
+                {
+                    Ok(_) | Err(CoreError::AlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await?;
             self.cache_write(digest, bytes);
         }
 
@@ -811,7 +933,7 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        next.updated_at = now;
+        enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self
@@ -900,12 +1022,30 @@ impl Store {
         plan: P,
         snapshot: HeadSnapshot,
     ) -> Result<CasResult<P::Outcome>> {
-        self.reject_v1(plan.resource()).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(plan.resource()).await?;
+        }
         if snapshot.value.generation > 0 && snapshot.value.head_commit.is_none() {
             return Err(
                 CoreError::RecoveryFailed("head has generation but no commit".into()).into(),
             );
         }
+        let guard = plan.live_lease();
+        let lease_src = snapshot.value.clone();
+        self.publication_io(
+            &guard,
+            &lease_src,
+            self.commit_at_snapshot_inner(identity, plan, snapshot),
+        )
+        .await
+    }
+
+    async fn commit_at_snapshot_inner<P: RefMutationPlan>(
+        &self,
+        identity: OpIdentity,
+        plan: P,
+        snapshot: HeadSnapshot,
+    ) -> Result<CasResult<P::Outcome>> {
         let now = self.clock().now();
         let generation = snapshot
             .value
@@ -939,7 +1079,17 @@ impl Store {
                 u.payload.clone(),
                 &self.key,
             );
-            uploaded.push((env.meta.digest.clone(), env.encode()?));
+            let bytes = env.encode()?;
+            let cap = encoded_object_cap(&u.schema);
+            if bytes.len() as u64 > cap {
+                return Err(CoreError::ObjectTooLarge {
+                    key: self.object_key(&env.meta.digest),
+                    limit: cap,
+                    actual: Some(bytes.len() as u64),
+                }
+                .into());
+            }
+            uploaded.push((env.meta.digest.clone(), bytes));
         }
         if prepared.commit_upload.is_none() {
             let header = CommitHeader {
@@ -974,7 +1124,17 @@ impl Store {
                 serde_json::to_vec(&commit)?,
                 &self.key,
             );
-            uploaded.push((env.meta.digest.clone(), env.encode()?));
+            let bytes = env.encode()?;
+            let cap = encoded_object_cap(COMMIT_SCHEMA);
+            if bytes.len() as u64 > cap {
+                return Err(CoreError::ObjectTooLarge {
+                    key: self.object_key(&env.meta.digest),
+                    limit: cap,
+                    actual: Some(bytes.len() as u64),
+                }
+                .into());
+            }
+            uploaded.push((env.meta.digest.clone(), bytes));
         }
         for (digest, bytes) in &uploaded {
             match self
@@ -1000,7 +1160,7 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        next.updated_at = now;
+        enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self
@@ -1131,10 +1291,22 @@ impl Store {
     }
 
     pub(crate) async fn load_commit_view(&self, digest: &Digest) -> Result<CommitView> {
-        let (payload, _) = self
-            .get_blob(digest)
-            .await
-            .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} unreadable: {e:#}")))?;
+        let (payload, _) = if self.layout == KeyLayout::V2 {
+            self.get_blob(digest)
+                .await
+                .map_err(|e| map_commit_read_error(digest, e))?
+        } else {
+            let spec = EnvelopeReadSpec {
+                tenant: &self.tenant,
+                kind: ObjectKind::Blob,
+                allowed_schemas: COMMIT_VIEW_ENVELOPES,
+                max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+                max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+            };
+            self.get_blob_limited(digest, spec)
+                .await
+                .map_err(|e| map_commit_read_error(digest, e))?
+        };
         let value: serde_json::Value = serde_json::from_slice(&payload)
             .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} is not JSON: {e}")))?;
         let schema = value
@@ -1154,10 +1326,21 @@ impl Store {
                 target_follows_commit: false,
             });
         }
-        if schema != LOG_MANIFEST_SCHEMA {
+        if !LOG_MANIFEST_CARRIERS.contains(&schema) {
             return Err(CoreError::RecoveryFailed(format!(
                 "object {digest} has unknown commit schema {schema}"
             ))
+            .into());
+        }
+        if self.layout == KeyLayout::V3
+            && schema == LOG_MANIFEST_SCHEMA_V3
+            && payload.len() as u64 > MAX_MANIFEST_OBJECT_BYTES
+        {
+            return Err(CoreError::ObjectTooLarge {
+                key: self.object_key(digest),
+                limit: MAX_MANIFEST_OBJECT_BYTES,
+                actual: Some(payload.len() as u64),
+            }
             .into());
         }
         let header_v = value.get("header").cloned().ok_or_else(|| {
@@ -1166,22 +1349,44 @@ impl Store {
         let header: CommitHeader = serde_json::from_value(header_v)
             .map_err(|e| CoreError::RecoveryFailed(format!("header in {digest}: {e}")))?;
         header.validate()?;
-        let admitted = match value.get("admitted") {
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|e| CoreError::RecoveryFailed(format!("admitted in {digest}: {e}")))?,
-            None => Vec::new(),
-        };
-        let result = value
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let ref_state = match value.get("ref_state") {
-            Some(v) if !v.is_null() => {
-                Some(serde_json::from_value(v.clone()).map_err(|e| {
-                    CoreError::RecoveryFailed(format!("ref_state in {digest}: {e}"))
+        let (admitted, result, ref_state) = if schema == LOG_MANIFEST_SCHEMA_V3 {
+            require_v3_field(&value, digest, "log")?;
+            require_v3_field(&value, digest, "stable_admissions")?;
+            let admitted_v = require_v3_field(&value, digest, "admitted")?;
+            let result_v = require_v3_field(&value, digest, "result")?;
+            let ref_state_v = require_v3_field(&value, digest, "ref_state")?;
+            let admitted = serde_json::from_value(admitted_v.clone())
+                .map_err(|e| CoreError::IntegrityError(format!("admitted in v3 {digest}: {e}")))?;
+            let ref_state = if ref_state_v.is_null() {
+                return Err(CoreError::IntegrityError(format!(
+                    "v3 manifest {digest} is missing ref_state"
+                ))
+                .into());
+            } else {
+                Some(serde_json::from_value(ref_state_v.clone()).map_err(|e| {
+                    CoreError::IntegrityError(format!("ref_state in v3 {digest}: {e}"))
                 })?)
-            }
-            _ => None,
+            };
+            (admitted, result_v.clone(), ref_state)
+        } else {
+            let admitted = match value.get("admitted") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| CoreError::RecoveryFailed(format!("admitted in {digest}: {e}")))?,
+                None => Vec::new(),
+            };
+            let result = value
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let ref_state = match value.get("ref_state") {
+                Some(v) if !v.is_null() => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| {
+                        CoreError::RecoveryFailed(format!("ref_state in {digest}: {e}"))
+                    })?)
+                }
+                _ => None,
+            };
+            (admitted, result, ref_state)
         };
         Ok(CommitView {
             digest: digest.clone(),
@@ -1227,11 +1432,75 @@ impl Store {
         Ok(out)
     }
 
+    /// Owner-aware v3 renewal: fresh snapshot, refuse expired/foreign leases,
+    /// no generation bump.
+    pub(crate) async fn renew_owned_lease(
+        &self,
+        name: &str,
+        writer: &str,
+        epoch: u64,
+        ttl_secs: i64,
+    ) -> Result<RefValue> {
+        for _ in 0..16 {
+            let snapshot = self
+                .read_head(name)
+                .await?
+                .ok_or_else(|| anyhow!("ref {name} does not exist"))?;
+            let now = self.clock().now();
+            if snapshot.value.epoch != epoch {
+                return Err(CoreError::Fenced {
+                    caller: epoch,
+                    live: snapshot.value.epoch,
+                }
+                .into());
+            }
+            let Some(lease) = snapshot.value.lease.as_ref() else {
+                return Err(
+                    CoreError::Rejected(format!("ref {name} has no lease to renew")).into(),
+                );
+            };
+            if lease.writer != writer {
+                return Err(CoreError::LeaseHeld {
+                    holder: lease.writer.clone(),
+                    until: lease.lease_until.to_rfc3339(),
+                }
+                .into());
+            }
+            if !snapshot.value.lease_live(now) {
+                return Err(CoreError::LeaseExpired.into());
+            }
+            let cas_now = self.clock().now();
+            if !snapshot.value.lease_live(cas_now) {
+                return Err(CoreError::LeaseExpired.into());
+            }
+            let mut next = snapshot.value.clone();
+            next.lease = Some(comb_core::Lease {
+                writer: writer.into(),
+                lease_until: cas_now + chrono::Duration::seconds(ttl_secs),
+            });
+            next.updated_at = cas_now;
+            let bytes = serde_json::to_vec_pretty(&next)?;
+            match self
+                .backend
+                .put_update(&self.ref_key(name), snapshot.version.as_ref(), &bytes)
+                .await
+            {
+                Ok(_) => return Ok(next),
+                Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
+                    continue
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(anyhow!("renew: lost the ref race 16 times"))
+    }
+
     /// Lease renewal: fresh snapshot, no generation bump, no new commit.
     pub async fn renew_lease(&self, name: &str, fence: u64, ttl_secs: i64) -> Result<RefValue> {
-        self.reject_v1(name).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(name).await?;
+        }
         for _ in 0..16 {
-            let now = self.clock().now();
             let snapshot = self
                 .read_head(name)
                 .await?
@@ -1249,12 +1518,13 @@ impl Store {
                 .as_ref()
                 .map(|l| l.writer.clone())
                 .ok_or_else(|| anyhow!("ref {name} has no lease to renew"))?;
+            let cas_now = self.clock().now();
             let mut next = snapshot.value.clone();
             next.lease = Some(comb_core::Lease {
                 writer,
-                lease_until: now + chrono::Duration::seconds(ttl_secs),
+                lease_until: cas_now + chrono::Duration::seconds(ttl_secs),
             });
-            next.updated_at = now;
+            next.updated_at = cas_now;
             let bytes = serde_json::to_vec_pretty(&next)?;
             match self
                 .backend
@@ -1457,6 +1727,45 @@ fn intent_expiry(identity: &OpIdentity, policy: &OperationPolicy) -> Option<Date
     match identity {
         OpIdentity::Generic(op) => Some(op.expires_at(policy)),
         OpIdentity::Stable(_) => None,
+    }
+}
+
+const MAX_CHUNK_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
+
+pub(crate) fn encoded_object_cap(schema: &str) -> u64 {
+    if LOG_MANIFEST_CARRIERS.contains(&schema) || schema == COMMIT_SCHEMA || schema == HEADER_SCHEMA
+    {
+        MAX_MANIFEST_OBJECT_BYTES
+    } else {
+        MAX_CHUNK_OBJECT_BYTES
+    }
+}
+
+fn require_v3_field<'a>(
+    value: &'a serde_json::Value,
+    digest: &Digest,
+    field: &str,
+) -> Result<&'a serde_json::Value> {
+    value.get(field).ok_or_else(|| {
+        CoreError::IntegrityError(format!("v3 manifest {digest} is missing {field}")).into()
+    })
+}
+
+pub(crate) fn map_commit_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<CoreError>() {
+        Ok(CoreError::BackendUnavailable(m)) => {
+            CoreError::BackendUnavailable(format!("commit {digest}: {m}")).into()
+        }
+        Ok(CoreError::Io(io)) => {
+            CoreError::BackendUnavailable(format!("commit {digest}: {io}")).into()
+        }
+        Ok(CoreError::NotFound(_)) => {
+            CoreError::IntegrityError(format!("commit {digest} is missing")).into()
+        }
+        Ok(other) => {
+            CoreError::RecoveryFailed(format!("commit {digest} unreadable: {other}")).into()
+        }
+        Err(e) => CoreError::RecoveryFailed(format!("commit {digest} unreadable: {e:#}")).into(),
     }
 }
 
@@ -1688,5 +1997,141 @@ mod tests {
         assert_eq!(published.value.target, Some(target));
         assert_eq!(published.value.head_commit, Some(view.digest));
         assert_ne!(published.value.lease, None);
+    }
+
+    #[tokio::test]
+    async fn v3_manifest_missing_recovery_fields_is_integrity() {
+        let store = store().with_layout(KeyLayout::V3);
+        let op = store.mint_operation();
+        let header = CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "log/foo/p0".into(),
+            generation: 1,
+            epoch: 1,
+            identity: op.to_string(),
+            request: store.key.digest(b"req"),
+            parent: None,
+            skip: None,
+            at: chrono::Utc::now(),
+        };
+        header.validate().unwrap();
+        let mut missing_ref = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA_V3,
+            "header": header,
+            "log": "log/foo/p0",
+            "epoch": 1,
+            "head_seq": 0,
+            "admitted": [],
+            "stable_admissions": [],
+            "result": null
+        });
+        let (d1, _) = store
+            .put_blob(serde_json::to_vec(&missing_ref).unwrap())
+            .await
+            .unwrap();
+        let err = store.load_commit_view(&d1).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(m)) if m.contains("ref_state")
+            ),
+            "{err:#}"
+        );
+
+        missing_ref["ref_state"] = serde_json::json!({
+            "schema": RefValue::SCHEMA,
+            "tenant": "org_t",
+            "name": "log/foo/p0",
+            "generation": 1,
+            "epoch": 1,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        });
+        missing_ref.as_object_mut().unwrap().remove("admitted");
+        let (d2, _) = store
+            .put_blob(serde_json::to_vec(&missing_ref).unwrap())
+            .await
+            .unwrap();
+        let err = store.load_commit_view(&d2).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(m)) if m.contains("admitted")
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_manifest_above_v3_cap_stays_readable() {
+        let store = store();
+        let op = store.mint_operation();
+        let header = CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "log/big/p0".into(),
+            generation: 1,
+            epoch: 0,
+            identity: op.to_string(),
+            request: store.key.digest(b"req"),
+            parent: None,
+            skip: None,
+            at: chrono::Utc::now(),
+        };
+        header.validate().unwrap();
+        let mut value = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA,
+            "header": header,
+            "log": "log/big/p0",
+            "epoch": 0,
+            "head_seq": 0,
+            "chunks": [],
+            "retention": "complete",
+        });
+        value["pad"] = serde_json::Value::String("x".repeat(600 * 1024));
+        let encoded = serde_json::to_vec(&value).unwrap();
+        assert!(encoded.len() as u64 > comb_core::MAX_MANIFEST_OBJECT_BYTES);
+        let (digest, _) = store.put_blob(encoded).await.unwrap();
+        let view = store.load_commit_view(&digest).await.unwrap();
+        assert_eq!(view.header.resource, "log/big/p0");
+
+        let mut v3 = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA_V3,
+            "header": header,
+            "log": "log/big/p0",
+            "epoch": 0,
+            "head_seq": 0,
+            "admitted": [],
+            "stable_admissions": [],
+            "result": null,
+            "ref_state": {
+                "schema": RefValue::SCHEMA,
+                "tenant": "org_t",
+                "name": "log/big/p0",
+                "generation": 1,
+                "epoch": 0,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            },
+        });
+        v3["pad"] = serde_json::Value::String("x".repeat(600 * 1024));
+        let env = Envelope::new(
+            &store.tenant,
+            ObjectKind::Blob,
+            LOG_MANIFEST_SCHEMA_V3,
+            serde_json::to_vec(&v3).unwrap(),
+            &store.key,
+        );
+        let bytes = env.encode().unwrap();
+        let v3 = store.clone().with_layout(KeyLayout::V3);
+        v3.backend
+            .put_create(&v3.object_key(&env.meta.digest), &bytes)
+            .await
+            .unwrap();
+        let err = v3.load_commit_view(&env.meta.digest).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::ObjectTooLarge { .. }) | Some(CoreError::RecoveryFailed(_))
+            ),
+            "{err:#}"
+        );
     }
 }

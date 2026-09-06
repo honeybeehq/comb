@@ -7,12 +7,16 @@
 use crate::store::Store;
 use anyhow::Result;
 use comb_core::error::CoreError;
-use comb_core::{Digest, StableKey};
+use comb_core::{
+    Digest, EnvelopeReadSpec, ObjectKind, StableKey, MAX_STABLE_INDEX_NODE_OBJECT_BYTES,
+};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 pub const NODE_SCHEMA: &str = "comb.log.stable-index-node/v1";
 pub const ROOT_SCHEMA: &str = "comb.log.stable-index-root/v1";
 pub const MAX_NODE_BYTES: usize = 4 * 1024;
+const HAMT_ENVELOPE_SCHEMAS: &[&str] = &["comb.object/v1"];
 pub const MAX_STABLE_ADMISSIONS: usize = 1_024;
 pub const MAX_STABLE_ADMISSION_BYTES: usize = 256 * 1024;
 const FANOUT: usize = 32;
@@ -422,7 +426,14 @@ async fn load_node(
     depth: usize,
     head: Option<IndexHead>,
 ) -> Result<HamtNode> {
-    let (payload, _) = match store.get_blob(digest).await {
+    let spec = EnvelopeReadSpec {
+        tenant: &store.tenant,
+        kind: ObjectKind::Blob,
+        allowed_schemas: HAMT_ENVELOPE_SCHEMAS,
+        max_encoded_bytes: NonZeroU64::new(MAX_STABLE_INDEX_NODE_OBJECT_BYTES).expect("nonzero"),
+        max_plaintext_bytes: NonZeroU64::new(MAX_NODE_BYTES as u64).expect("nonzero"),
+    };
+    let (payload, _) = match store.get_blob_limited(digest, spec).await {
         Ok(v) => v,
         Err(e) => return Err(map_node_read_error(digest, e)),
     };
@@ -525,6 +536,10 @@ fn map_node_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
         Ok(CoreError::Io(io)) => {
             CoreError::BackendUnavailable(format!("stable index node {digest}: {io}")).into()
         }
+        Ok(CoreError::ObjectTooLarge { limit, actual, .. }) => CoreError::IntegrityError(format!(
+            "stable index node {digest} exceeds encoded cap {limit} actual {actual:?}"
+        ))
+        .into(),
         Ok(e @ (CoreError::IntegrityError(_) | CoreError::InvalidFormat(_))) => e.into(),
         Ok(other) => CoreError::RecoveryFailed(format!(
             "unclassified stable index node error {digest}: {other}"
@@ -978,7 +993,7 @@ mod tests {
             .await
             .unwrap();
         let io_store = Store::new(
-            Arc::new(FailpointBackend::io_on_next_get(mem, "/objects/")),
+            Arc::new(FailpointBackend::io_on_next_get_limited(mem, "/objects/")),
             "org_t",
             DigestKey::from_bytes([9u8; 32]),
             None,

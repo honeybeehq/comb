@@ -202,9 +202,10 @@ async fn missing_history_fails_closed() {
     assert!(
         matches!(
             err.downcast_ref::<CoreError>(),
-            Some(CoreError::RecoveryFailed(_))
+            Some(CoreError::IntegrityError(_)) | Some(CoreError::RecoveryFailed(_))
         ) || format!("{err:#}").contains("recovery")
-            || format!("{err:#}").contains("unreadable"),
+            || format!("{err:#}").contains("unreadable")
+            || format!("{err:#}").contains("missing"),
         "{err:#}"
     );
     let (value, _) = store.read_ref("r").await.unwrap().unwrap();

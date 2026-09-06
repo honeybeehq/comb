@@ -880,6 +880,7 @@ async fn prepare_events(
         outcome: range,
         admitted,
         companions,
+        live_lease: None,
     })
 }
 
@@ -946,6 +947,7 @@ impl RefMutationPlan for StableAppendPlan {
             },
             admitted: inner.admitted,
             companions: inner.companions,
+            live_lease: None,
         })
     }
 }
@@ -1003,6 +1005,7 @@ impl RefMutationPlan for TakeoverPlan {
             outcome: EpochResult { epoch },
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }
@@ -1094,6 +1097,7 @@ impl RefMutationPlan for CompactPlan {
             outcome: merged,
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }
@@ -1150,6 +1154,7 @@ impl RefMutationPlan for TrimPlan {
             outcome: floor,
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }
@@ -1484,6 +1489,10 @@ async fn commit_group(
         }
     }
 }
+
+#[path = "feed.rs"]
+mod feed;
+pub use feed::*;
 
 mod hex_payload {
     use serde::{Deserialize, Deserializer, Serializer};

@@ -15,8 +15,11 @@ pub use commit::{
     IntentState, OpIntent, COMMIT_SCHEMA, HEADER_SCHEMA, INTENT_SCHEMA,
 };
 pub use digest::{Digest, DigestKey};
-pub use envelope::{Envelope, ObjectKind};
-pub use error::CoreError;
+pub use envelope::{
+    Envelope, EnvelopeReadSpec, ObjectKind, MAX_ENVELOPE_META_BYTES, MAX_MANIFEST_OBJECT_BYTES,
+    MAX_REF_OBJECT_BYTES, MAX_STABLE_INDEX_NODE_OBJECT_BYTES,
+};
+pub use error::{CoreError, EnvelopeFormatField};
 pub use operation::{
     domain_hash, Clock, FrozenClock, Material, OpIdentity, OperationId, OperationPolicy, StableKey,
     SystemClock, MAX_STABLE_KEY_BYTES,

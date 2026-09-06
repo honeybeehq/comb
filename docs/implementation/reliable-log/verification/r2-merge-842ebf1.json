@@ -1,0 +1,91 @@
+{
+  "production_sha": "842ebf1d7620b2aa7397782e31b326d538c22d32",
+  "integration_parent": "dea1b29954014d6eb57d9a92628ea7f9f4a63b9b",
+  "checked_at": "2026-09-06T13:51:03.890722+00:00",
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--offline",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 184.01948849996552
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--offline"
+      ],
+      "exit": 0,
+      "seconds": 159.43727058300283
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--offline"
+      ],
+      "exit": 0,
+      "seconds": 254.39754145802
+    }
+  ],
+  "node_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "node_syntax": "fixture, verifier, acceptance and bridge-load all pass",
+  "live_backend_checks": {
+    "production_sha": "842ebf1d7620b2aa7397782e31b326d538c22d32",
+    "scope": "Merged-tree backend bounded-get conformance and legacy R1 after-success lost-CAS recovery; not Foundation adapter or v3 feed end-to-end acceptance.",
+    "binaries": {
+      "limited": {
+        "path": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-merged-ijf6j56s/live/limited",
+        "sha256": "e65f2ae7e20ab4842a142fc9e497b113ec69c49484e69660fc8c9210a0c95df3"
+      },
+      "lost_cas": {
+        "path": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-merged-ijf6j56s/live/lost_cas",
+        "sha256": "0194fcb803dd5fd407939aeeb0208dbeb61f77a3a3b3ad4788926c9274cca235"
+      }
+    },
+    "runs": [
+      {
+        "backend": "s3",
+        "case": "limited",
+        "test": "conformance::tests::s3_get_limited_conforms_if_configured",
+        "exit_code": 0,
+        "seconds": 4.37
+      },
+      {
+        "backend": "s3",
+        "case": "lost_cas",
+        "test": "live_backend_lost_reply_and_stable_key",
+        "exit_code": 0,
+        "seconds": 6.311
+      },
+      {
+        "backend": "minio",
+        "case": "limited",
+        "test": "conformance::tests::s3_get_limited_conforms_if_configured",
+        "exit_code": 0,
+        "seconds": 1.972
+      },
+      {
+        "backend": "minio",
+        "case": "lost_cas",
+        "test": "live_backend_lost_reply_and_stable_key",
+        "exit_code": 0,
+        "seconds": 3.699
+      }
+    ]
+  },
+  "scope": "Merged production and preserved provisional transport. Foundation adapter not implemented; storage capabilities remain false."
+}

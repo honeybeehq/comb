@@ -1,13 +1,13 @@
 # Execution state
 
-Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evidence is linked below.
+Coordination reference updated 2026-09-06T13:48:23.110065+00:00. Acceptance evidence is linked below.
 
 ## Ownership and current work
 
 - Root09572752 owns integration branchfeat/reliable-log-r1 in comb-reliable-log-r1, contracts, CI, review and live backend acceptance.
 - R1owner30db6b86: production accepted through aa94980. Final lost-CAS drill e61d872 passed memory/local with the owner and immutable S3/MinIO runs with root. Current task is accepted/idle.
-- R2 owner 3311b020: fixed bd0b9ad passes all 25 unchanged parent cases, including blocked-upload loss termination. Only source correction remains: guard the entire new-publication future before initial compute_skip. Current-only task /tmp/comb-r2-current-task.md. Root owns integration conflicts and bridge handoff; caps remain false.
-- Foundationlead2efd79a9 owns bridge/fixture/acceptance paths. Parent adapter wiring waits for root-checked R2 APIs. Storage caps remainfalse.
+- R2 owner 3311b020: production accepted for bridge integration at 842ebf1. All 25 immutable parent cases pass; the outer guard covers the initial history read through final CAS. Owner is idle. Root owns the integration merge and live acceptance. [Adapter handoff](foundation-r2-adapter-handoff.md).
+- Foundation lead 2efd79a9 owns bridge, fixtures and acceptance paths. Adapter work starts from the root integration merge using the checked CompleteFeed and WriterSession APIs. Storage caps remain false until implementation and verification.
 - Pheromoneowner135f7971: A1 accepted at16b3a2e in pher-comb-log/feat/comb-log; now idle. Current-only task `/tmp/comb-pher-current-task.md`.
 - RetiredR1b9ca has no ownership. Its branchfeat/reliable-log and commits4706b79/29d271e are excluded.
 
@@ -32,6 +32,8 @@ Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evid
 - [R2 closure review at 1698ecd](../../review/reliable-log-r2-closure-1698ecd.md) closes all preceding 24 cases and records one remaining outstanding-I/O termination failure. [Receipt](verification/r2-closure-1698ecd.json).
 
 - [R2 closure review at bd0b9ad](../../review/reliable-log-r2-closure-bd0b9ad.md): all 25 parent cases pass. One outer-guard scope correction remains before integration. [Receipt](verification/r2-closure-bd0b9ad.json).
+
+- [R2 final closure at 842ebf1](../../review/reliable-log-r2-closure-842ebf1.md): all 25 parent cases pass and the outer guard source correction is closed. [Receipt](verification/r2-closure-842ebf1.json). Combined-tree tests, lint, build and eight JavaScript tests pass. Merged backend conformance and legacy recovery pass on S3/MinIO. [Merge receipt](verification/r2-merge-842ebf1.json).
 
 ## Remaining gates
 
