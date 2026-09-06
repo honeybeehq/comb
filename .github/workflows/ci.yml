@@ -28,6 +28,7 @@ jobs:
           node --check scripts/foundation-bridge-fixture.mjs
           node --check scripts/foundation-bridge-verify.mjs
           node --check scripts/foundation-bridge-acceptance.mjs
+          node --check docs/implementation/reliable-log/verification/bridge-load.mjs
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 45
