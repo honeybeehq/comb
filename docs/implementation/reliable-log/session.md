@@ -34,3 +34,15 @@ This document records orchestration facts for session continuation. It is not an
 - Pheromone branch now includes01dbe34 after3fb9782 and51fcfbb, with50 worker tests passing. Root found further silent catch-up error handling and disconnect cleanup issues; /tmp/comb-pher-current-task.md records them. Independent daemon smoke is pending the current build.
 - Grok message delivery can remain queued while the runtime is busy. Do not assume sent means read. Consolidated task files preserve current decisions. Stopping only an owned child runtime previously caused Hive to revive it and deliver a queued message; no shared services were restarted.
 - GC review and root disposition are committed in gc-review.md and gc-design.md. Physical collection stays disabled, including namespace-only deferred deletion.
+
+## R1 worker replacement
+
+The old worker received a stale queued batch-key instruction and started reversing the settled single-payload API. Repeated runtime interrupts did not reliably drain obsolete mail. Root revoked its implementation ownership, preserved WIP in a new checkout, and created a fresh worker with only the consolidated current task.
+
+- Current integration checkout: /Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r1.
+- Current integration branch: feat/reliable-log-r1, based on c948306.
+- Sole R1 production owner:30db6b86-e87b-4213-9797-87909e1a3c29, Grok grok-4.6/xhigh.
+- Current task: /tmp/comb-r1-replacement-task.md. Root observations: /tmp/comb-r1-review-notes.md.
+- Old b9ca1d3d worker has no write ownership. Do not send it further implementation messages or integrate its later output. Its old checkout is preserved.
+- Claude review r1-concurrency-review.md found group receipt fabrication, unresolved companion rebasing, an Applied-companion duplicate race and incomplete proof validation. These must be fixed before R1 acceptance.
+- R2 contract r2-contract.md is finalized. It includes bounded backend reads, catalog manifests, one-payload stable append and renewable instance-owned sessions. No destructive collection.
