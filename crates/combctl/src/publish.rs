@@ -20,6 +20,7 @@ use comb_object::Version;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::num::NonZeroU64;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub const NS_V2: &str = "comb/v2";
@@ -115,6 +116,38 @@ fn enforce_live_lease(
     Ok(())
 }
 
+impl Store {
+    async fn publication_io<T>(
+        &self,
+        guard: &Option<LiveLeaseGuard>,
+        lease_src: &RefValue,
+        fut: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let Some(g) = guard else {
+            return fut.await;
+        };
+        if g.cancel.is_cancelled() {
+            return Err(CoreError::LeaseExpired.into());
+        }
+        let now = self.clock().now();
+        let Some(lease) = lease_src.lease.as_ref() else {
+            return Err(CoreError::LeaseExpired.into());
+        };
+        if lease.lease_until <= now {
+            return Err(CoreError::LeaseExpired.into());
+        }
+        let wait = (lease.lease_until - now)
+            .to_std()
+            .unwrap_or(Duration::from_millis(1));
+        tokio::select! {
+            biased;
+            _ = g.cancel.cancelled() => Err(CoreError::LeaseExpired.into()),
+            _ = tokio::time::sleep(wait) => Err(CoreError::LeaseExpired.into()),
+            r = fut => r,
+        }
+    }
+}
+
 pub(crate) struct PrepareCtx<'a> {
     pub store: &'a Store,
     pub snapshot: &'a HeadSnapshot,
@@ -147,6 +180,9 @@ pub(crate) trait RefMutationPlan: Send + Sync {
 
     fn resource(&self) -> &str;
     fn material(&self) -> Material;
+    fn live_lease(&self) -> Option<LiveLeaseGuard> {
+        None
+    }
     fn prepare(
         &self,
         ctx: PrepareCtx<'_>,
@@ -757,7 +793,10 @@ impl Store {
             skip,
             now,
         };
-        let prepared = plan.prepare(ctx).await?;
+        let guard = plan.live_lease();
+        let prepared = self
+            .publication_io(&guard, &snapshot.value, plan.prepare(ctx))
+            .await?;
         if prepared.next.generation != generation {
             return Err(anyhow!(
                 "plan set generation {} want {generation}",
@@ -859,14 +898,17 @@ impl Store {
         }
 
         for (digest, bytes, _, _) in &uploaded {
-            match self
-                .backend
-                .put_create(&self.object_key(digest), bytes)
-                .await
-            {
-                Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
+            self.publication_io(&guard, &prepared.next, async {
+                match self
+                    .backend
+                    .put_create(&self.object_key(digest), bytes)
+                    .await
+                {
+                    Ok(_) | Err(CoreError::AlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await?;
             self.cache_write(digest, bytes);
         }
 
@@ -1011,7 +1053,10 @@ impl Store {
             skip,
             now,
         };
-        let prepared = plan.prepare(ctx).await?;
+        let guard = plan.live_lease();
+        let prepared = self
+            .publication_io(&guard, &snapshot.value, plan.prepare(ctx))
+            .await?;
         let mut uploaded: Vec<(Digest, Vec<u8>)> = Vec::new();
         for u in &prepared.uploads {
             let env = Envelope::new(
@@ -1079,14 +1124,17 @@ impl Store {
             uploaded.push((env.meta.digest.clone(), bytes));
         }
         for (digest, bytes) in &uploaded {
-            match self
-                .backend
-                .put_create(&self.object_key(digest), bytes)
-                .await
-            {
-                Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
+            self.publication_io(&guard, &prepared.next, async {
+                match self
+                    .backend
+                    .put_create(&self.object_key(digest), bytes)
+                    .await
+                {
+                    Ok(_) | Err(CoreError::AlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await?;
             self.cache_write(digest, bytes);
         }
         let commit_digest = if let Some(idx) = prepared.commit_upload {
@@ -1105,15 +1153,26 @@ impl Store {
         enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
-        match self
-            .backend
-            .put_update(
-                &self.ref_key(plan.resource()),
-                snapshot.version.as_ref(),
-                &ref_bytes,
-            )
-            .await
-        {
+        let cas = self
+            .publication_io(&guard, &next, async {
+                match self
+                    .backend
+                    .put_update(
+                        &self.ref_key(plan.resource()),
+                        snapshot.version.as_ref(),
+                        &ref_bytes,
+                    )
+                    .await
+                {
+                    Ok(v) => Ok(Ok(v)),
+                    Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
+                        Ok(Err(()))
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await?;
+        match cas {
             Ok(_) => Ok(CasResult::Committed(Published {
                 outcome: prepared.outcome,
                 generation,
@@ -1123,10 +1182,7 @@ impl Store {
                 first_delivery: true,
                 admitted: prepared.admitted,
             })),
-            Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
-                Ok(CasResult::Conflict)
-            }
-            Err(e) => Err(e.into()),
+            Err(()) => Ok(CasResult::Conflict),
         }
     }
 

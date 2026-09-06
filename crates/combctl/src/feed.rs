@@ -1566,6 +1566,14 @@ impl RefMutationPlan for CompleteAppendPlan {
         &self.resource
     }
 
+    fn live_lease(&self) -> Option<LiveLeaseGuard> {
+        Some(LiveLeaseGuard {
+            writer: self.instance.clone(),
+            epoch: self.epoch,
+            cancel: self.loss.clone(),
+        })
+    }
+
     fn material(&self) -> Material {
         Material {
             kind: "append-stable".into(),

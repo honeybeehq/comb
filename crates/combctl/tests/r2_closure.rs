@@ -967,3 +967,61 @@ async fn review_lost_session_cannot_finish_suspended_append() {
         "Lost session issued a new publication after resuming upload: {got:?}"
     );
 }
+
+#[tokio::test]
+async fn review_lost_session_terminates_blocked_append_without_resume() {
+    let backend = Arc::new(PausedRefRead::new());
+    let store = Arc::new(Store::new(
+        backend.clone(),
+        "review",
+        DigestKey::from_bytes([9; 32]),
+        None,
+    ));
+    let feed = CompleteFeed::open(store, "paused".into(), &call())
+        .await
+        .unwrap();
+    let policy = LeasePolicy {
+        ttl: Duration::from_secs(3),
+        renew_every: Duration::from_millis(100),
+        clock_slack: Duration::ZERO,
+        initial_acquire_budget: Duration::from_secs(3),
+    };
+    let writer = Arc::new(
+        feed.writer_session(WriterLabel::try_from("paused").unwrap(), policy)
+            .unwrap(),
+    );
+    writer.ready(&call()).await.unwrap();
+    backend.pause_write.store(true, Ordering::SeqCst);
+    let pending = {
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            writer
+                .append_stable(
+                    StableKey::try_from_canonical(b"one".to_vec()).unwrap(),
+                    Bytes::from_static(b"payload"),
+                    &call(),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !backend.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    backend.fail_read.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !matches!(writer.state(), WriterState::Lost { .. }) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let got = tokio::time::timeout(Duration::from_millis(400), pending).await;
+    assert!(
+        matches!(got, Ok(Ok(Err(_)))),
+        "Lost append waited for blocked upload: {got:?}"
+    );
+}
