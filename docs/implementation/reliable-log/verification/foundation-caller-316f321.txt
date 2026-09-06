@@ -1,0 +1,32 @@
+✔ invalid JSON with no pending request prevents a success receipt (36.080959ms)
+✔ unsolicited response with no pending request prevents a success receipt (11.999125ms)
+✔ partial stdout arriving after exit but before close prevents success (8.303292ms)
+✔ receipt writer waits for a clean close (15.566291ms)
+✔ reusing an output directory fails without disturbing its old receipt (8.3435ms)
+✔ unavailable append retries exact frozen identity with new request ids and records recovery (8.629583ms)
+✔ bounded append exhaustion cannot write a success artifact (5.029667ms)
+✔ one overall deadline shrinks request budgets and prevents another retry (1.994125ms)
+✔ append conflict is terminal with no retry (3.564125ms)
+✔ append cancelled is terminal with no retry (2.864375ms)
+✔ append deadline_exceeded is terminal with no retry (1.652791ms)
+✔ append fenced is terminal with no retry (1.29425ms)
+✔ append reacquire_required is terminal with no retry (1.220792ms)
+✔ append integrity is terminal with no retry (4.265708ms)
+✔ append invalid_request is terminal with no retry (1.036209ms)
+✔ cancellation during retry backoff sends no second append (3.754458ms)
+✔ cancelling a pending request is terminal and cannot retry or write a receipt (12.496041ms)
+✔ a late success past the overall deadline does not become an accepted append (1.523791ms)
+✔ invalid response and late protocol junk are terminal during append recovery (2.504292ms)
+✔ the actual acceptance runner records exhausted attempts without success artifacts (3685.821084ms)
+✔ a pending append hits its remaining request deadline without retry (2.351958ms)
+✔ stable key uses big-endian byte lengths and raw SHA256 bytes (2.330292ms)
+✔ UTF-8 IDs retain their bytes without Unicode normalization (0.993333ms)
+✔ invalid identity bytes fail before constructing a key (5.88125ms)
+ℹ tests 24
+ℹ suites 0
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4102.245541
