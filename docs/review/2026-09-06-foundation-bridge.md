@@ -28,6 +28,9 @@ frame resynchronization and explicit EOF teardown. The client/key suite passes a
 eight checks, including late junk with no pending request and stale output refusal.
 Both process regressions pass after the fixes in `209199a`, using the bridge's
 private Cargo target. The acceptance runner also passes `node --check`.
+A third passing process test sends a line larger than 1 MiB across multiple input
+buffers, followed by a valid hello. Both replies arrive with their request IDs;
+the bridge preserves the next request while draining the oversized line.
 
 Transport success is separate from storage acceptance. The bridge advertises
 `durable_idempotency: false` and `bounded_memory_read: false`; append, read, and

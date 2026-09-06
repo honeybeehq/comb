@@ -76,3 +76,37 @@ async fn host_closing_stdout_ends_process_while_stdin_is_open() {
         .unwrap();
     drop(stdin);
 }
+
+#[tokio::test]
+async fn oversized_line_across_reader_buffers_preserves_next_request() {
+    let (_directory, mut child) = process(Stdio::piped());
+    let mut input = b"{\"v\":1,\"id\":\"oversized\",\"op\":\"hello\",\"padding\":\"".to_vec();
+    input.extend(std::iter::repeat(b'x').take(1_048_576 + 16_384));
+    input.extend_from_slice(b"\"}\n{\"v\":1,\"id\":\"next\",\"op\":\"hello\"}\n");
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = tokio::spawn(async move { stdin.write_all(&input).await.unwrap() });
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("bridge lost a request after draining an oversized line")
+        .unwrap();
+    writer.await.unwrap();
+    assert!(output.status.success());
+    let frames: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            assert!(line.len() <= 1_048_576);
+            serde_json::from_slice(line).unwrap()
+        })
+        .collect();
+    assert_eq!(frames.len(), 2);
+    let oversized = frames
+        .iter()
+        .find(|frame| frame["id"] == "oversized")
+        .unwrap();
+    assert_eq!(oversized["error"]["code"], "invalid_request");
+    let next = frames.iter().find(|frame| frame["id"] == "next").unwrap();
+    assert_eq!(next["ok"], true);
+    assert_eq!(next["op"], "hello");
+}
