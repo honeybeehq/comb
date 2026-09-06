@@ -1,0 +1,11 @@
+{
+  "source_commit": "5bda039",
+  "returncode": 101,
+  "elapsed_secs": 271.28,
+  "command": "cargo test -p pher --offline review_ -- --test-threads=1",
+  "repo": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/pher-a1-review-_nd73vp7/repo",
+  "target": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/pher-a1-review-_nd73vp7/target",
+  "regressions_failed": 2,
+  "regressions_passed": 0,
+  "binary_sha256": "811cc85d2013f2d6dfbfd1f40256c30c0ee1361e24249e52e323db0387fc880c"
+}
