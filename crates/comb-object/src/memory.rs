@@ -1,8 +1,10 @@
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, LimitedObject, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use comb_core::error::{CoreError, Result};
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Mutex;
 
 /// In-memory backend for tests (spec §7.10). Version tokens are counters.
@@ -62,6 +64,21 @@ impl ObjectBackend for MemoryBackend {
             .get(key)
             .map(|(b, v, _)| (b.clone(), Version(v.to_string())))
             .ok_or_else(|| CoreError::NotFound(key.into()))
+    }
+
+    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+        let state = self.state.lock().unwrap();
+        let (bytes, version, _) = state
+            .get(key)
+            .ok_or_else(|| CoreError::NotFound(key.into()))?;
+        let actual = bytes.len() as u64;
+        if actual > max_encoded_bytes.get() {
+            return Err(object_too_large(key, max_encoded_bytes, Some(actual)));
+        }
+        Ok(LimitedObject {
+            bytes: Bytes::copy_from_slice(bytes),
+            version: Version(version.to_string()),
+        })
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

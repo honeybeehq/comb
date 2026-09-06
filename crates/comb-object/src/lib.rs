@@ -14,5 +14,5 @@ pub mod local;
 pub mod memory;
 pub mod s3;
 
-pub use backend::{ObjectBackend, ObjectInfo, Version};
+pub use backend::{LimitedObject, ObjectBackend, ObjectInfo, Version};
 pub use failpoint::{CountingBackend, FailAction, FailMethod, FailRule, FailpointBackend};

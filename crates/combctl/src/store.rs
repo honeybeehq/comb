@@ -4,9 +4,11 @@ use comb_core::error::CoreError;
 use comb_core::operation::{
     Clock, Material, OpIdentity, OperationId, OperationPolicy, SystemClock,
 };
-use comb_core::{Digest, DigestKey, Envelope, ObjectKind, RefValue};
+use comb_core::{Digest, DigestKey, Envelope, ObjectClass, ObjectKind, RefValue};
 use comb_object::{ObjectBackend, Version};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -121,12 +123,124 @@ impl Store {
         Ok((env.payload, GetSource::Backend))
     }
 
+    /// Bounded blob read for classed R2 objects.
+    ///
+    /// The disk cache is subject to the same encoded cap as the backend.
+    /// Oversized cache entries are quarantined and the backend is retried.
+    pub async fn get_blob_limited(
+        &self,
+        digest: &Digest,
+        class: ObjectClass,
+    ) -> Result<(Vec<u8>, GetSource)> {
+        let object_key = self.object_key(digest);
+        match self.cache_read_limited(digest, &object_key, class.max_encoded_bytes) {
+            Ok(Some(bytes)) => match Envelope::decode_limited(
+                &bytes,
+                &self.key,
+                class.max_encoded_bytes,
+                class.expectation(),
+                &object_key,
+            ) {
+                Ok(env) if env.meta.digest == *digest => {
+                    if (env.payload.len() as u64) > class.max_plaintext_bytes.get() {
+                        return Err(CoreError::ObjectTooLarge {
+                            key: object_key,
+                            limit: class.max_plaintext_bytes.get(),
+                            actual: Some(env.payload.len() as u64),
+                        }
+                        .into());
+                    }
+                    return Ok((env.payload, GetSource::Cache));
+                }
+                Ok(_) | Err(CoreError::IntegrityError(_)) | Err(CoreError::InvalidFormat(_)) => {
+                    self.cache_quarantine(digest);
+                    eprintln!(
+                        "warning: cache entry for {digest} failed verification — quarantined, refetching from backend"
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            },
+            Ok(None) => {}
+            Err(CoreError::ObjectTooLarge { .. }) => {
+                self.cache_quarantine(digest);
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let limited = self
+            .backend
+            .get_limited(&object_key, class.max_encoded_bytes)
+            .await?;
+        let env = Envelope::decode_limited(
+            &limited.bytes,
+            &self.key,
+            class.max_encoded_bytes,
+            class.expectation(),
+            &object_key,
+        )?;
+        if env.meta.digest != *digest {
+            return Err(anyhow_digest_mismatch(digest));
+        }
+        if (env.payload.len() as u64) > class.max_plaintext_bytes.get() {
+            return Err(CoreError::ObjectTooLarge {
+                key: object_key,
+                limit: class.max_plaintext_bytes.get(),
+                actual: Some(env.payload.len() as u64),
+            }
+            .into());
+        }
+        self.cache_write(digest, limited.bytes.as_ref());
+        Ok((env.payload, GetSource::Backend))
+    }
+
     fn cache_path(&self, digest: &Digest) -> Option<PathBuf> {
         self.cache_dir.as_ref().map(|d| d.join(digest.hex()))
     }
 
     fn cache_read(&self, digest: &Digest) -> Option<Vec<u8>> {
         std::fs::read(self.cache_path(digest)?).ok()
+    }
+
+    fn cache_read_limited(
+        &self,
+        digest: &Digest,
+        object_key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> comb_core::error::Result<Option<Vec<u8>>> {
+        let Some(path) = self.cache_path(digest) else {
+            return Ok(None);
+        };
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        if meta.len() > max_encoded_bytes.get() {
+            return Err(CoreError::ObjectTooLarge {
+                key: object_key.into(),
+                limit: max_encoded_bytes.get(),
+                actual: Some(meta.len()),
+            });
+        }
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        };
+        let mut buf = Vec::new();
+        if file
+            .take(max_encoded_bytes.get().saturating_add(1))
+            .read_to_end(&mut buf)
+            .is_err()
+        {
+            return Ok(None);
+        }
+        if (buf.len() as u64) > max_encoded_bytes.get() {
+            return Err(CoreError::ObjectTooLarge {
+                key: object_key.into(),
+                limit: max_encoded_bytes.get(),
+                actual: None,
+            });
+        }
+        Ok(Some(buf))
     }
 
     pub(crate) fn cache_write(&self, digest: &Digest, bytes: &[u8]) {

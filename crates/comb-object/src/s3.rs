@@ -1,9 +1,12 @@
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, LimitedObject, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
+use bytes::Bytes;
 use comb_core::error::{CoreError, Result};
+use std::num::NonZeroU64;
+use tokio::io::AsyncReadExt;
 
 /// S3 backend (spec §7.10). Conditional semantics use S3 conditional
 /// writes: `If-None-Match: *` for create-only, `If-Match: <etag>` for
@@ -72,6 +75,19 @@ impl S3Backend {
             _ => CoreError::BackendUnavailable(format!("s3 put {key}: {err:?}")),
         }
     }
+
+    fn map_get_err<E: ProvideErrorMetadata + std::fmt::Debug>(
+        key: &str,
+        err: &aws_sdk_s3::error::SdkError<E>,
+    ) -> CoreError {
+        let status = err.raw_response().map(|r| r.status().as_u16());
+        let code = err.as_service_error().and_then(|s| s.code()).unwrap_or("");
+        if status == Some(404) || code == "NoSuchKey" {
+            CoreError::NotFound(key.into())
+        } else {
+            CoreError::BackendUnavailable(format!("s3 get {key}: {err:?}"))
+        }
+    }
 }
 
 #[async_trait]
@@ -121,14 +137,7 @@ impl ObjectBackend for S3Backend {
             .key(self.full_key(key))
             .send()
             .await
-            .map_err(|e| {
-                let code = e.as_service_error().and_then(|s| s.code()).unwrap_or("");
-                if code == "NoSuchKey" {
-                    CoreError::NotFound(key.into())
-                } else {
-                    CoreError::BackendUnavailable(format!("s3 get {key}: {e:?}"))
-                }
-            })?;
+            .map_err(|e| Self::map_get_err(key, &e))?;
         let etag = out.e_tag().unwrap_or_default().to_string();
         let bytes = out
             .body
@@ -138,6 +147,37 @@ impl ObjectBackend for S3Backend {
             .into_bytes()
             .to_vec();
         Ok((bytes, Version(etag)))
+    }
+
+    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(self.full_key(key))
+            .send()
+            .await
+            .map_err(|e| Self::map_get_err(key, &e))?;
+        let etag = out.e_tag().unwrap_or_default().to_string();
+        if let Some(n) = out.content_length().and_then(|n| u64::try_from(n).ok()) {
+            if n > max_encoded_bytes.get() {
+                return Err(object_too_large(key, max_encoded_bytes, Some(n)));
+            }
+        }
+        let take_n = max_encoded_bytes.get().saturating_add(1);
+        let mut reader = out.body.into_async_read().take(take_n);
+        let mut buf = Vec::new();
+        reader
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("s3 body {key}: {e}")))?;
+        if buf.len() as u64 > max_encoded_bytes.get() {
+            return Err(object_too_large(key, max_encoded_bytes, None));
+        }
+        Ok(LimitedObject {
+            bytes: Bytes::from(buf),
+            version: Version(etag),
+        })
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

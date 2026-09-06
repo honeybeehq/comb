@@ -9,11 +9,12 @@
 //!
 //! Injection is driven by a seeded RNG so every chaos run is reproducible.
 
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{LimitedObject, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use comb_core::error::{CoreError, Result};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -94,6 +95,13 @@ impl ObjectBackend for FaultBackend {
             return Err(self.lost_request("get"));
         }
         self.inner.get(key).await
+    }
+
+    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+        if self.roll(self.fail_before) {
+            return Err(self.lost_request("get_limited"));
+        }
+        self.inner.get_limited(key, max_encoded_bytes).await
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

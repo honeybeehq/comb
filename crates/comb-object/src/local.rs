@@ -1,8 +1,12 @@
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{
+    object_too_large, read_sync_limited, LimitedObject, ObjectBackend, ObjectInfo, Version,
+};
 use async_trait::async_trait;
+use bytes::Bytes;
 use comb_core::error::{CoreError, Result};
 use std::fs;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 /// Local filesystem backend (spec §7.11): create-only objects through
@@ -138,6 +142,33 @@ impl ObjectBackend for LocalBackend {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn get_limited(&self, key: &str, max_encoded_bytes: NonZeroU64) -> Result<LimitedObject> {
+        let path = self.path_for(key)?;
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CoreError::NotFound(key.into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if meta.len() > max_encoded_bytes.get() {
+            return Err(object_too_large(key, max_encoded_bytes, Some(meta.len())));
+        }
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CoreError::NotFound(key.into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = read_sync_limited(file, key, max_encoded_bytes)?;
+        let version = Self::version_of(&bytes);
+        Ok(LimitedObject {
+            bytes: Bytes::from(bytes),
+            version,
+        })
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
