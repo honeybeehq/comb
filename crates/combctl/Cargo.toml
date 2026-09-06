@@ -1,5 +1,6 @@
 [package]
 name = "combctl"
+default-run = "combctl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
