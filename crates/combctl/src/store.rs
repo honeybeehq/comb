@@ -16,6 +16,8 @@ pub struct Store {
     pub tenant: String,
     pub key: DigestKey,
     pub cache_dir: Option<PathBuf>,
+    /// Owned by this Store. Not keyed off the backend pointer or tenant, so
+    /// two Stores sharing a backend keep independent clocks and policies.
     clock: Arc<dyn Clock>,
     policy: OperationPolicy,
 }

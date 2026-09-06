@@ -594,16 +594,50 @@ async fn racing_groups_admit_shared_producer_once() {
 }
 
 #[tokio::test]
-async fn independent_clocks_on_shared_backend() {
-    let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
-    let t2 = Utc.with_ymd_and_hms(2021, 6, 1, 12, 0, 0).unwrap();
+async fn independent_clocks_and_policies_on_shared_backend() {
+    let t0 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    let t1 = Utc.with_ymd_and_hms(2021, 6, 1, 12, 0, 0).unwrap();
     let mem: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
-    let a = store_on(mem.clone()).with_clock(Arc::new(FrozenClock::new(t1)));
-    let b = store_on(mem).with_clock(Arc::new(FrozenClock::new(t2)));
+    let clock_a = FrozenClock::new(t0);
+    let clock_b = FrozenClock::new(t1);
+    let short = OperationPolicy {
+        window: Duration::days(1),
+        first_use: Duration::minutes(5),
+        max_future_skew: Duration::minutes(2),
+    };
+    let a = store_on(mem.clone())
+        .with_clock(Arc::new(clock_a.clone()))
+        .with_policy(short);
+    let b = store_on(mem).with_clock(Arc::new(clock_b.clone()));
     let oa = a.mint_operation();
     let ob = b.mint_operation();
-    assert_eq!(oa.issued_at(), t1);
-    assert_eq!(ob.issued_at(), t2);
+    assert_eq!(oa.issued_at(), t0);
+    assert_eq!(ob.issued_at(), t1);
+
+    let (digest, _) = a.put_blob(b"x".to_vec()).await.unwrap();
+    a.set_target_op(oa, "ra", digest.clone(), None)
+        .await
+        .unwrap();
+    b.set_target_op(ob, "rb", digest.clone(), None)
+        .await
+        .unwrap();
+
+    clock_a.add(Duration::days(2));
+    clock_b.add(Duration::days(2));
+    let err = a
+        .set_target_op(oa, "ra", digest.clone(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::UnknownOperation { .. })
+        ),
+        "{err:#}"
+    );
+    let again = b.set_target_op(ob, "rb", digest, None).await.unwrap();
+    assert_eq!(again.generation, 1);
+    assert!(!again.first_delivery);
 }
 
 #[tokio::test]
