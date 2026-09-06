@@ -1,51 +1,94 @@
-use anyhow::{anyhow, Result};
-use chrono::{Duration, Utc};
+use crate::publish::{HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan};
+use anyhow::Result;
 use comb_core::error::CoreError;
-use comb_core::refs::RefJournalEntry;
-use comb_core::{Digest, DigestKey, Envelope, Lease, ObjectKind, RefValue};
+use comb_core::operation::{
+    Clock, Material, OpIdentity, OperationId, OperationPolicy, SystemClock,
+};
+use comb_core::{Digest, DigestKey, Envelope, ObjectKind, RefValue};
 use comb_object::{ObjectBackend, Version};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-/// High-level store: envelopes over an object backend, a read-through
-/// verified cache, refs with lease/fence semantics, and the ref journal.
 #[derive(Clone)]
 pub struct Store {
-    pub backend: std::sync::Arc<dyn ObjectBackend>,
+    pub backend: Arc<dyn ObjectBackend>,
     pub tenant: String,
     pub key: DigestKey,
-    /// Node-local verified object cache (spec §15). `None` disables it
-    /// (used when the backend itself is the local filesystem).
     pub cache_dir: Option<PathBuf>,
+    clock: Arc<dyn Clock>,
+    policy: OperationPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct MutationOutcome {
+    pub generation: u64,
+    pub epoch: u64,
+    pub commit: Digest,
+    pub value: RefValue,
+    pub first_delivery: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MutationResult {
+    pub generation: u64,
+    pub epoch: u64,
 }
 
 impl Store {
-    fn object_key(&self, digest: &Digest) -> String {
-        format!(
-            "comb/v1/tenants/{}/objects/b3k/{}/{}",
-            self.tenant,
-            digest.key_prefix(),
-            digest.hex()
-        )
+    pub fn new(
+        backend: Arc<dyn ObjectBackend>,
+        tenant: impl Into<String>,
+        key: DigestKey,
+        cache_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            backend,
+            tenant: tenant.into(),
+            key,
+            cache_dir,
+            clock: Arc::new(SystemClock),
+            policy: OperationPolicy::default(),
+        }
     }
 
-    fn ref_key(&self, name: &str) -> String {
-        format!("comb/v1/tenants/{}/refs/{name}.json", self.tenant)
+    pub fn with_clock(self, clock: Arc<dyn Clock>) -> Self {
+        Self { clock, ..self }
     }
 
-    fn journal_head_key(&self) -> String {
-        // Shared journal scope for the tenant (spec §7.5a.3). Journal refs
-        // are themselves never journaled.
-        format!("comb/v1/tenants/{}/refs/core/journal/tenant.json", self.tenant)
+    pub fn with_policy(self, policy: OperationPolicy) -> Self {
+        Self { policy, ..self }
+    }
+
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
+    pub(crate) fn policy(&self) -> OperationPolicy {
+        self.policy.clone()
+    }
+
+    pub fn mint_operation(&self) -> OperationId {
+        OperationId::mint(self.clock().as_ref())
     }
 
     // ---- blobs ----------------------------------------------------------
 
-    /// Store plaintext as an immutable blob. Returns (digest, deduplicated).
     pub async fn put_blob(&self, payload: Vec<u8>) -> Result<(Digest, bool)> {
-        let env = Envelope::new(&self.tenant, ObjectKind::Blob, "comb.object/v1", payload, &self.key);
+        let env = Envelope::new(
+            &self.tenant,
+            ObjectKind::Blob,
+            "comb.object/v1",
+            payload,
+            &self.key,
+        );
         let digest = env.meta.digest.clone();
         let bytes = env.encode()?;
-        let dedup = match self.backend.put_create(&self.object_key(&digest), &bytes).await {
+        let dedup = match self
+            .backend
+            .put_create(&self.object_key(&digest), &bytes)
+            .await
+        {
             Ok(_) => false,
             Err(CoreError::AlreadyExists(_)) => true,
             Err(e) => return Err(e.into()),
@@ -54,8 +97,6 @@ impl Store {
         Ok((digest, dedup))
     }
 
-    /// Read and verify a blob, through the cache when enabled. A corrupt
-    /// cache entry is quarantined and the object refetched (spec §15.1).
     pub async fn get_blob(&self, digest: &Digest) -> Result<(Vec<u8>, GetSource)> {
         if let Some(bytes) = self.cache_read(digest) {
             match Envelope::decode(&bytes, &self.key) {
@@ -64,7 +105,9 @@ impl Store {
                 }
                 Ok(_) | Err(CoreError::IntegrityError(_)) | Err(CoreError::InvalidFormat(_)) => {
                     self.cache_quarantine(digest);
-                    eprintln!("warning: cache entry for {digest} failed verification — quarantined, refetching from backend");
+                    eprintln!(
+                        "warning: cache entry for {digest} failed verification — quarantined, refetching from backend"
+                    );
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -72,7 +115,7 @@ impl Store {
         let (bytes, _) = self.backend.get(&self.object_key(digest)).await?;
         let env = Envelope::decode(&bytes, &self.key)?;
         if env.meta.digest != *digest {
-            return Err(anyhow!("backend returned object whose digest does not match {digest}"));
+            return Err(anyhow_digest_mismatch(digest));
         }
         self.cache_write(digest, &bytes);
         Ok((env.payload, GetSource::Backend))
@@ -86,7 +129,7 @@ impl Store {
         std::fs::read(self.cache_path(digest)?).ok()
     }
 
-    fn cache_write(&self, digest: &Digest, bytes: &[u8]) {
+    pub(crate) fn cache_write(&self, digest: &Digest, bytes: &[u8]) {
         if let Some(path) = self.cache_path(digest) {
             let _ = std::fs::create_dir_all(path.parent().unwrap());
             let _ = std::fs::write(path, bytes);
@@ -102,34 +145,168 @@ impl Store {
     // ---- refs -----------------------------------------------------------
 
     pub async fn read_ref(&self, name: &str) -> Result<Option<(RefValue, Version)>> {
-        match self.backend.get(&self.ref_key(name)).await {
-            Ok((bytes, version)) => {
-                let value: RefValue = serde_json::from_slice(&bytes)?;
-                Ok(Some((value, version)))
-            }
-            Err(CoreError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e.into()),
+        match self.read_head(name).await? {
+            None => Ok(None),
+            Some(HeadSnapshot { value, version }) => Ok(Some((
+                value,
+                version.unwrap_or_else(|| Version(String::new())),
+            ))),
         }
     }
 
-    async fn write_ref(&self, name: &str, expected: Option<&Version>, next: &RefValue) -> Result<Version> {
-        let bytes = serde_json::to_vec_pretty(next)?;
-        Ok(self.backend.put_update(&self.ref_key(name), expected, &bytes).await?)
+    pub async fn set_target(
+        &self,
+        name: &str,
+        target: Digest,
+        fence: Option<u64>,
+    ) -> Result<MutationOutcome> {
+        self.set_target_op(self.mint_operation(), name, target, fence)
+            .await
     }
 
-    /// Advance a ref's target: one guarded write. When the ref carries a
-    /// live lease, the caller must present the matching fence (epoch);
-    /// a stale fence fails with `Fenced`, no fence fails with `LeaseHeld`.
-    pub async fn set_target(&self, name: &str, target: Digest, fence: Option<u64>) -> Result<RefValue> {
-        let now = Utc::now();
-        let (current, version) = match self.read_ref(name).await? {
-            Some((v, ver)) => (v, Some(ver)),
-            None => (RefValue::new(&self.tenant, name), None),
-        };
+    pub async fn set_target_op(
+        &self,
+        op: OperationId,
+        name: &str,
+        target: Digest,
+        fence: Option<u64>,
+    ) -> Result<MutationOutcome> {
+        let published = self
+            .publish(
+                OpIdentity::Generic(op),
+                SetTargetPlan {
+                    name: name.to_string(),
+                    target,
+                    fence,
+                },
+            )
+            .await?;
+        Ok(published.into())
+    }
 
-        if let Some(f) = fence {
+    pub async fn claim(
+        &self,
+        op: OperationId,
+        name: &str,
+        writer: &str,
+        ttl_secs: i64,
+        steal: bool,
+    ) -> Result<MutationOutcome> {
+        let published = self
+            .publish(
+                OpIdentity::Generic(op),
+                ClaimPlan {
+                    name: name.to_string(),
+                    writer: writer.to_string(),
+                    ttl_secs,
+                    steal,
+                },
+            )
+            .await?;
+        Ok(published.into())
+    }
+
+    pub async fn release(
+        &self,
+        op: OperationId,
+        name: &str,
+        fence: u64,
+    ) -> Result<MutationOutcome> {
+        let published = self
+            .publish(
+                OpIdentity::Generic(op),
+                ReleasePlan {
+                    name: name.to_string(),
+                    fence,
+                },
+            )
+            .await?;
+        Ok(published.into())
+    }
+
+    pub async fn renew(&self, name: &str, fence: u64, ttl_secs: i64) -> Result<RefValue> {
+        self.renew_lease(name, fence, ttl_secs).await
+    }
+
+    pub async fn history(&self, name: &str, max: usize) -> Result<Vec<comb_core::HistoryEntry>> {
+        self.history_chain(name, max).await
+    }
+}
+
+impl From<Published<MutationResult>> for MutationOutcome {
+    fn from(p: Published<MutationResult>) -> Self {
+        Self {
+            generation: p.generation,
+            epoch: p.epoch,
+            commit: p.commit,
+            value: p.value,
+            first_delivery: p.first_delivery,
+        }
+    }
+}
+
+fn anyhow_digest_mismatch(digest: &Digest) -> anyhow::Error {
+    anyhow::anyhow!("backend returned object whose digest does not match {digest}")
+}
+
+async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Result<()> {
+    let Some(digest) = current.target.as_ref() else {
+        return Ok(());
+    };
+    let (payload, _) = store.get_blob(digest).await.map_err(|e| {
+        CoreError::Rejected(format!(
+            "core set-target cannot overwrite a ref whose target {digest} cannot be read: {e:#}"
+        ))
+    })?;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return Ok(());
+    };
+    if value.get("schema").and_then(|s| s.as_str()) == Some("comb.log.partition-manifest/v2") {
+        return Err(
+            CoreError::Rejected("core set-target cannot overwrite a log-owned ref".into()).into(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetSource {
+    Cache,
+    Backend,
+}
+
+struct SetTargetPlan {
+    name: String,
+    target: Digest,
+    fence: Option<u64>,
+}
+
+impl RefMutationPlan for SetTargetPlan {
+    type Outcome = MutationResult;
+
+    fn resource(&self) -> &str {
+        &self.name
+    }
+
+    fn material(&self) -> Material {
+        Material {
+            kind: "set-target".into(),
+            preconditions: vec![("target".into(), self.target.to_string().into_bytes())],
+            payload: Vec::new(),
+        }
+    }
+
+    async fn prepare(&self, ctx: PrepareCtx<'_>) -> Result<PreparedMutation<Self::Outcome>> {
+        let now = ctx.now;
+        let current = &ctx.snapshot.value;
+        reject_existing_log_manifest(ctx.store, current).await?;
+        if let Some(f) = self.fence {
             if f != current.epoch {
-                return Err(CoreError::Fenced { caller: f, live: current.epoch }.into());
+                return Err(CoreError::Fenced {
+                    caller: f,
+                    live: current.epoch,
+                }
+                .into());
             }
         } else if current.lease_live(now) {
             let lease = current.lease.as_ref().unwrap();
@@ -139,28 +316,63 @@ impl Store {
             }
             .into());
         }
-
         let mut next = current.clone();
-        next.generation += 1;
-        next.target = Some(target);
+        next.generation = ctx.generation;
+        next.target = Some(self.target.clone());
         next.updated_at = now;
-        self.write_ref(name, version.as_ref(), &next).await?;
-        self.journal_append(&current, &next).await?;
-        Ok(next)
+        Ok(PreparedMutation {
+            next: next.clone(),
+            uploads: Vec::new(),
+            commit_upload: None,
+            change: serde_json::json!({ "kind": "set-target", "target": self.target }),
+            outcome: MutationResult {
+                generation: ctx.generation,
+                epoch: next.epoch,
+            },
+            admitted: Vec::new(),
+            companions: Vec::new(),
+        })
+    }
+}
+
+struct ClaimPlan {
+    name: String,
+    writer: String,
+    ttl_secs: i64,
+    steal: bool,
+}
+
+impl RefMutationPlan for ClaimPlan {
+    type Outcome = MutationResult;
+
+    fn resource(&self) -> &str {
+        &self.name
     }
 
-    /// Acquire the ref's lease at a new epoch (spec §7.6). Fails with
-    /// `LeaseHeld` while a live lease exists, unless `steal` (administrative
-    /// takeover). The returned epoch is the fencing token.
-    pub async fn claim(&self, name: &str, writer: &str, ttl_secs: i64, steal: bool) -> Result<RefValue> {
-        let now = Utc::now();
-        let (current, version) = match self.read_ref(name).await? {
-            Some((v, ver)) => (v, Some(ver)),
-            None => (RefValue::new(&self.tenant, name), None),
-        };
-        if current.lease_live(now) && !steal {
+    fn material(&self) -> Material {
+        Material {
+            kind: "claim".into(),
+            preconditions: vec![
+                ("writer".into(), self.writer.as_bytes().to_vec()),
+                (
+                    "steal".into(),
+                    if self.steal {
+                        b"1".to_vec()
+                    } else {
+                        b"0".to_vec()
+                    },
+                ),
+            ],
+            payload: Vec::new(),
+        }
+    }
+
+    async fn prepare(&self, ctx: PrepareCtx<'_>) -> Result<PreparedMutation<Self::Outcome>> {
+        let now = ctx.now;
+        let current = &ctx.snapshot.value;
+        if current.lease_live(now) && !self.steal {
             let lease = current.lease.as_ref().unwrap();
-            if lease.writer != writer {
+            if lease.writer != self.writer {
                 return Err(CoreError::LeaseHeld {
                     holder: lease.writer.clone(),
                     until: lease.lease_until.to_rfc3339(),
@@ -169,132 +381,75 @@ impl Store {
             }
         }
         let mut next = current.clone();
-        next.generation += 1;
-        next.epoch += 1;
-        next.lease = Some(Lease {
-            writer: writer.to_string(),
-            lease_until: now + Duration::seconds(ttl_secs),
+        next.generation = ctx.generation;
+        next.epoch = current
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| CoreError::Rejected("epoch overflow".into()))?;
+        next.lease = Some(comb_core::Lease {
+            writer: self.writer.clone(),
+            lease_until: now + chrono::Duration::seconds(self.ttl_secs),
         });
         next.updated_at = now;
-        self.write_ref(name, version.as_ref(), &next).await?;
-        self.journal_append(&current, &next).await?;
-        Ok(next)
-    }
-
-    /// Renew the lease. Not a logical change: generation does not advance
-    /// and nothing is journaled (spec §7.5a.3).
-    pub async fn renew(&self, name: &str, fence: u64, ttl_secs: i64) -> Result<RefValue> {
-        let now = Utc::now();
-        let (current, version) = self
-            .read_ref(name)
-            .await?
-            .ok_or_else(|| anyhow!("ref {name} does not exist"))?;
-        if current.epoch != fence {
-            return Err(CoreError::Fenced { caller: fence, live: current.epoch }.into());
-        }
-        let mut next = current.clone();
-        let writer = next
-            .lease
-            .as_ref()
-            .map(|l| l.writer.clone())
-            .ok_or_else(|| anyhow!("ref {name} has no lease to renew"))?;
-        next.lease = Some(Lease { writer, lease_until: now + Duration::seconds(ttl_secs) });
-        next.updated_at = now;
-        self.write_ref(name, Some(&version), &next).await?;
-        Ok(next)
-    }
-
-    /// Release the lease. A logical change: journaled.
-    pub async fn release(&self, name: &str, fence: u64) -> Result<RefValue> {
-        let now = Utc::now();
-        let (current, version) = self
-            .read_ref(name)
-            .await?
-            .ok_or_else(|| anyhow!("ref {name} does not exist"))?;
-        if current.epoch != fence {
-            return Err(CoreError::Fenced { caller: fence, live: current.epoch }.into());
-        }
-        let mut next = current.clone();
-        next.generation += 1;
-        next.lease = None;
-        next.updated_at = now;
-        self.write_ref(name, Some(&version), &next).await?;
-        self.journal_append(&current, &next).await?;
-        Ok(next)
-    }
-
-    // ---- journal --------------------------------------------------------
-
-    /// Append one entry to the tenant journal after a successful logical
-    /// ref update. Written after the CAS: a lost journal write degrades
-    /// auditability, never consistency (spec §7.5a.3).
-    async fn journal_append(&self, prev: &RefValue, next: &RefValue) -> Result<()> {
-        for _ in 0..16 {
-            let head = self.journal_head().await?;
-            let entry = RefJournalEntry {
-                schema: "comb.journal-entry/v1".into(),
-                ref_name: next.name.clone(),
-                prev_generation: prev.generation,
-                new_generation: next.generation,
+        Ok(PreparedMutation {
+            next: next.clone(),
+            uploads: Vec::new(),
+            commit_upload: None,
+            change: serde_json::json!({ "kind": "claim", "writer": self.writer, "steal": self.steal }),
+            outcome: MutationResult {
+                generation: ctx.generation,
                 epoch: next.epoch,
-                target: next.target.clone(),
-                writer: next.lease.as_ref().map(|l| l.writer.clone()),
-                parent: head.as_ref().map(|(digest, _)| digest.clone()),
-                at: next.updated_at,
-            };
-            let payload = serde_json::to_vec(&entry)?;
-            let env = Envelope::new(&self.tenant, ObjectKind::JournalEntry, "comb.journal-entry/v1", payload, &self.key);
-            let digest = env.meta.digest.clone();
-            match self.backend.put_create(&self.object_key(&digest), &env.encode()?).await {
-                Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-            let body = serde_json::to_vec(&serde_json::json!({ "entry": digest.to_string() }))?;
-            let expected = head.as_ref().map(|(_, v)| v);
-            match self.backend.put_update(&self.journal_head_key(), expected, &body).await {
-                Ok(_) => return Ok(()),
-                Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Err(anyhow!("journal head contention: gave up after 16 attempts"))
-    }
-
-    async fn journal_head(&self) -> Result<Option<(Digest, Version)>> {
-        match self.backend.get(&self.journal_head_key()).await {
-            Ok((bytes, version)) => {
-                let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-                let digest = Digest::parse(v["entry"].as_str().unwrap_or_default())
-                    .map_err(|e| anyhow!("corrupt journal head: {e}"))?;
-                Ok(Some((digest, version)))
-            }
-            Err(CoreError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Walk the journal from the head, newest first, filtered by ref name
-    /// (empty filter returns everything).
-    pub async fn history(&self, ref_name: &str, max: usize) -> Result<Vec<RefJournalEntry>> {
-        let mut out = Vec::new();
-        let mut cursor = self.journal_head().await?.map(|(d, _)| d);
-        while let Some(digest) = cursor {
-            if out.len() >= max {
-                break;
-            }
-            let (payload, _) = self.get_blob(&digest).await?;
-            let entry: RefJournalEntry = serde_json::from_slice(&payload)?;
-            cursor = entry.parent.clone();
-            if ref_name.is_empty() || entry.ref_name == ref_name {
-                out.push(entry);
-            }
-        }
-        Ok(out)
+            },
+            admitted: Vec::new(),
+            companions: Vec::new(),
+        })
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum GetSource {
-    Cache,
-    Backend,
+struct ReleasePlan {
+    name: String,
+    fence: u64,
+}
+
+impl RefMutationPlan for ReleasePlan {
+    type Outcome = MutationResult;
+
+    fn resource(&self) -> &str {
+        &self.name
+    }
+
+    fn material(&self) -> Material {
+        Material {
+            kind: "release".into(),
+            preconditions: Vec::new(),
+            payload: Vec::new(),
+        }
+    }
+
+    async fn prepare(&self, ctx: PrepareCtx<'_>) -> Result<PreparedMutation<Self::Outcome>> {
+        let current = &ctx.snapshot.value;
+        if current.epoch != self.fence {
+            return Err(CoreError::Fenced {
+                caller: self.fence,
+                live: current.epoch,
+            }
+            .into());
+        }
+        let mut next = current.clone();
+        next.generation = ctx.generation;
+        next.lease = None;
+        next.updated_at = ctx.now;
+        Ok(PreparedMutation {
+            next: next.clone(),
+            uploads: Vec::new(),
+            commit_upload: None,
+            change: serde_json::json!({ "kind": "release" }),
+            outcome: MutationResult {
+                generation: ctx.generation,
+                epoch: next.epoch,
+            },
+            admitted: Vec::new(),
+            companions: Vec::new(),
+        })
+    }
 }

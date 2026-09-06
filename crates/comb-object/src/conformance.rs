@@ -34,7 +34,11 @@ pub async fn run(backend: Arc<dyn ObjectBackend>, key_prefix: &str) -> Vec<Check
         results.push(CheckResult {
             name: "create-only enforced",
             passed,
-            detail: format!("first={:?} second={:?}", first.map(|_| "ok"), second.map(|_| "ok")),
+            detail: format!(
+                "first={:?} second={:?}",
+                first.map(|_| "ok"),
+                second.map(|_| "ok")
+            ),
         });
     }
 
@@ -97,7 +101,10 @@ pub async fn run(backend: Arc<dyn ObjectBackend>, key_prefix: &str) -> Vec<Check
             .await;
         results.push(CheckResult {
             name: "guarded update of missing key rejected",
-            passed: matches!(res, Err(CoreError::PreconditionFailed(_)) | Err(CoreError::NotFound(_))),
+            passed: matches!(
+                res,
+                Err(CoreError::PreconditionFailed(_)) | Err(CoreError::NotFound(_))
+            ),
             detail: format!("{:?}", res.map(|_| "ACCEPTED (bad)")),
         });
     }

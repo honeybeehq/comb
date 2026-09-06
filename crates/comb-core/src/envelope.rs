@@ -41,7 +41,13 @@ impl Envelope {
     /// canonical plaintext with the tenant digest key (spec §7.2, §7.4).
     /// Compression and encryption are "none" in this slice; both are
     /// format-tagged so later versions can add them without migration.
-    pub fn new(tenant: &str, kind: ObjectKind, schema: &str, payload: Vec<u8>, key: &DigestKey) -> Self {
+    pub fn new(
+        tenant: &str,
+        kind: ObjectKind,
+        schema: &str,
+        payload: Vec<u8>,
+        key: &DigestKey,
+    ) -> Self {
         let digest = key.digest(&payload);
         Envelope {
             meta: EnvelopeMeta {
@@ -83,11 +89,15 @@ impl Envelope {
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
         if version != ENVELOPE_VERSION {
-            return Err(CoreError::InvalidFormat(format!("unsupported envelope version {version}")));
+            return Err(CoreError::InvalidFormat(format!(
+                "unsupported envelope version {version}"
+            )));
         }
         let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         if meta_len > MAX_META_BYTES as usize || bytes.len() < 12 + meta_len {
-            return Err(CoreError::InvalidFormat("truncated envelope metadata".into()));
+            return Err(CoreError::InvalidFormat(
+                "truncated envelope metadata".into(),
+            ));
         }
         let meta: EnvelopeMeta = serde_json::from_slice(&bytes[12..12 + meta_len])
             .map_err(|e| CoreError::InvalidFormat(format!("meta decode: {e}")))?;
@@ -120,7 +130,13 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let bytes = env.encode().unwrap();
         let back = Envelope::decode(&bytes, &key()).unwrap();
         assert_eq!(back.payload, b"payload");
@@ -129,7 +145,13 @@ mod tests {
 
     #[test]
     fn bit_flip_is_detected() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let mut bytes = env.encode().unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
@@ -141,9 +163,18 @@ mod tests {
 
     #[test]
     fn wrong_tenant_key_fails_verification() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let bytes = env.encode().unwrap();
         let other = DigestKey::from_bytes([9u8; 32]);
-        assert!(matches!(Envelope::decode(&bytes, &other), Err(CoreError::IntegrityError(_))));
+        assert!(matches!(
+            Envelope::decode(&bytes, &other),
+            Err(CoreError::IntegrityError(_))
+        ));
     }
 }

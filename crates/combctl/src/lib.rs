@@ -3,6 +3,10 @@
 
 pub mod chaos;
 pub mod config;
+pub(crate) mod hamt;
 pub mod log;
+pub(crate) mod publish;
 pub mod store;
 pub mod sweep;
+
+pub use publish::{HeadSnapshot, Published, NS_V1, NS_V2};

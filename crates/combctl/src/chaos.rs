@@ -23,7 +23,12 @@ pub struct ChaosReport {
     pub violations: Vec<String>,
 }
 
-pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> Result<ChaosReport> {
+pub async fn run(
+    iterations: u64,
+    seed: u64,
+    fail_prob: f64,
+    progress: bool,
+) -> Result<ChaosReport> {
     let inner: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
     let faulty = Arc::new(FaultBackend::new(inner.clone(), seed, fail_prob, fail_prob));
     let key = DigestKey::from_bytes([42u8; 32]);
@@ -31,22 +36,15 @@ pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> 
 
     // The store under attack, and a fault-free verifier over the same
     // authoritative state (what a fresh reader would observe).
-    let store = Store {
-        backend: faulty.clone(),
-        tenant: tenant.clone(),
-        key: key.clone(),
-        cache_dir: None,
-    };
-    let verify = Store {
-        backend: inner.clone(),
-        tenant,
-        key,
-        cache_dir: None,
-    };
+    let store = Store::new(faulty.clone(), tenant.clone(), key.clone(), None);
+    let verify = Store::new(inner.clone(), tenant, key, None);
 
     let ref_name = "chaos/main";
     let mut rng = StdRng::seed_from_u64(seed ^ 0x9e3779b97f4a7c15);
-    let mut report = ChaosReport { iterations, ..Default::default() };
+    let mut report = ChaosReport {
+        iterations,
+        ..Default::default()
+    };
 
     // Last state a verifier confirmed committed. Invariants are checked
     // against this after every operation.
@@ -69,13 +67,30 @@ pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> 
         let outcome = match op {
             0 | 1 => {
                 let fence = if leased { Some(live_epoch) } else { None };
-                store.set_target(ref_name, payload_digest.clone(), fence).await.map(|_| ())
+                let id = store.mint_operation();
+                store
+                    .set_target_op(id, ref_name, payload_digest.clone(), fence)
+                    .await
+                    .map(|_| ())
             }
-            2 => store.claim(ref_name, "chaos-writer", 60, false).await.map(|_| ()),
-            3 => store.claim(ref_name, "chaos-thief", 60, true).await.map(|_| ()),
+            2 => {
+                let id = store.mint_operation();
+                store
+                    .claim(id, ref_name, "chaos-writer", 60, false)
+                    .await
+                    .map(|_| ())
+            }
+            3 => {
+                let id = store.mint_operation();
+                store
+                    .claim(id, ref_name, "chaos-thief", 60, true)
+                    .await
+                    .map(|_| ())
+            }
             4 => {
                 if leased {
-                    store.release(ref_name, live_epoch).await.map(|_| ())
+                    let id = store.mint_operation();
+                    store.release(id, ref_name, live_epoch).await.map(|_| ())
                 } else {
                     Ok(())
                 }
@@ -84,7 +99,11 @@ pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> 
                 // Deliberately stale fence: must fail with Fenced, must
                 // never advance anything.
                 if live_epoch > 0 {
-                    match store.set_target(ref_name, payload_digest.clone(), Some(live_epoch - 1)).await {
+                    let id = store.mint_operation();
+                    match store
+                        .set_target_op(id, ref_name, payload_digest.clone(), Some(live_epoch - 1))
+                        .await
+                    {
                         Err(e) if is_fenced(&e) => Ok(()),
                         Err(e) => Err(e),
                         Ok(_) => {
@@ -141,10 +160,14 @@ pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> 
             }
             Ok(None) => {
                 if committed_gen > 0 {
-                    report.violations.push(format!("iter {i}: committed ref disappeared"));
+                    report
+                        .violations
+                        .push(format!("iter {i}: committed ref disappeared"));
                 }
             }
-            Err(e) => report.violations.push(format!("iter {i}: committed ref unreadable: {e:#}")),
+            Err(e) => report
+                .violations
+                .push(format!("iter {i}: committed ref unreadable: {e:#}")),
         }
 
         if progress && (i + 1) % 200 == 0 {
@@ -167,18 +190,20 @@ pub async fn run(iterations: u64, seed: u64, fail_prob: f64, progress: bool) -> 
         Ok(entries) => {
             let mut last_gen = u64::MAX;
             for e in &entries {
-                if e.new_generation >= last_gen {
+                if e.generation >= last_gen {
                     report.violations.push(format!(
-                        "journal: generations not strictly decreasing from head ({} then {})",
-                        last_gen, e.new_generation
+                        "commit chain: generations not strictly decreasing from head ({} then {})",
+                        last_gen, e.generation
                     ));
                 }
-                last_gen = e.new_generation;
+                last_gen = e.generation;
             }
             // Every journal entry's object decoded and digest-verified in
             // history(); reaching here means the chain is intact.
         }
-        Err(e) => report.violations.push(format!("journal walk failed: {e:#}")),
+        Err(e) => report
+            .violations
+            .push(format!("journal walk failed: {e:#}")),
     }
 
     report.injected_faults = faulty.injected_before.load(Ordering::Relaxed)

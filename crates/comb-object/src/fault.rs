@@ -29,7 +29,12 @@ pub struct FaultBackend {
 }
 
 impl FaultBackend {
-    pub fn new(inner: Arc<dyn ObjectBackend>, seed: u64, fail_before: f64, fail_after: f64) -> Self {
+    pub fn new(
+        inner: Arc<dyn ObjectBackend>,
+        seed: u64,
+        fail_before: f64,
+        fail_after: f64,
+    ) -> Self {
         Self {
             inner,
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
@@ -68,7 +73,12 @@ impl ObjectBackend for FaultBackend {
         Ok(v)
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         if self.roll(self.fail_before) {
             return Err(self.lost_request("put_update"));
         }

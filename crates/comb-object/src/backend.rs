@@ -22,7 +22,12 @@ pub trait ObjectBackend: Send + Sync {
     /// Conditional replacement. `expected = None` means "create, key must
     /// not exist"; `Some(v)` means "replace only if the live version is v".
     /// Failure is `PreconditionFailed` (or `AlreadyExists` for None).
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version>;
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version>;
 
     /// Read the object and its current version token.
     async fn get(&self, key: &str) -> Result<(Vec<u8>, Version)>;

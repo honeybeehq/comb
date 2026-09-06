@@ -90,7 +90,12 @@ impl ObjectBackend for S3Backend {
         Ok(Version(out.e_tag().unwrap_or_default().to_string()))
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         let mut req = self
             .client
             .put_object()
@@ -150,7 +155,9 @@ impl ObjectBackend for S3Backend {
                 if status == Some(404) {
                     Ok(false)
                 } else {
-                    Err(CoreError::BackendUnavailable(format!("s3 head {key}: {e:?}")))
+                    Err(CoreError::BackendUnavailable(format!(
+                        "s3 head {key}: {e:?}"
+                    )))
                 }
             }
         }
@@ -169,7 +176,11 @@ impl ObjectBackend for S3Backend {
 
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectInfo>> {
         let full_prefix = self.full_key(prefix);
-        let strip = if self.prefix.is_empty() { String::new() } else { format!("{}/", self.prefix) };
+        let strip = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
         let mut out = Vec::new();
         let mut token: Option<String> = None;
         loop {

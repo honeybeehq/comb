@@ -31,6 +31,25 @@ pub enum CoreError {
     #[error("invalid format: {0}")]
     InvalidFormat(String),
 
+    #[error("unknown operation {id} (expired at {expired_at})")]
+    UnknownOperation { id: String, expired_at: String },
+
+    #[error("idempotency conflict for {id}")]
+    IdempotencyConflict {
+        id: String,
+        original: String,
+        supplied: String,
+    },
+
+    #[error("recovery evidence missing or malformed: {0}")]
+    RecoveryFailed(String),
+
+    #[error("rejected: {0}")]
+    Rejected(String),
+
+    #[error("stable key committed for different payload bytes (existing {existing}, supplied {supplied})")]
+    StableKeyConflict { existing: String, supplied: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

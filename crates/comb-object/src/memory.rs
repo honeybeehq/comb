@@ -28,7 +28,12 @@ impl ObjectBackend for MemoryBackend {
         Ok(Version("1".into()))
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         let mut state = self.state.lock().unwrap();
         match (state.get(key), expected) {
             (None, None) => {
@@ -75,7 +80,10 @@ impl ObjectBackend for MemoryBackend {
             .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(prefix))
-            .map(|(k, (_, _, at))| ObjectInfo { key: k.clone(), modified: *at })
+            .map(|(k, (_, _, at))| ObjectInfo {
+                key: k.clone(),
+                modified: *at,
+            })
             .collect())
     }
 }

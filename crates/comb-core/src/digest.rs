@@ -14,8 +14,8 @@ impl DigestKey {
     }
 
     pub fn from_hex(s: &str) -> Result<Self> {
-        let raw = hex::decode(s)
-            .map_err(|e| CoreError::InvalidFormat(format!("digest key hex: {e}")))?;
+        let raw =
+            hex::decode(s).map_err(|e| CoreError::InvalidFormat(format!("digest key hex: {e}")))?;
         let arr: [u8; 32] = raw
             .try_into()
             .map_err(|_| CoreError::InvalidFormat("digest key must be 32 bytes".into()))?;
@@ -53,17 +53,31 @@ impl Digest {
     pub const TAG: &'static str = "b3k";
 
     pub fn parse(s: &str) -> Result<Self> {
-        let rest = s
-            .strip_prefix("b3k:")
-            .ok_or_else(|| CoreError::InvalidFormat(format!("digest must start with b3k: — got {s}")))?;
-        if rest.len() != 64 || !rest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
-            return Err(CoreError::InvalidFormat(format!("malformed b3k digest: {s}")));
+        let rest = s.strip_prefix("b3k:").ok_or_else(|| {
+            CoreError::InvalidFormat(format!("digest must start with b3k: — got {s}"))
+        })?;
+        if rest.len() != 64
+            || !rest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(CoreError::InvalidFormat(format!(
+                "malformed b3k digest: {s}"
+            )));
         }
-        Ok(Self { hex: rest.to_string() })
+        Ok(Self {
+            hex: rest.to_string(),
+        })
     }
 
     pub fn hex(&self) -> &str {
         &self.hex
+    }
+
+    pub fn raw(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(&self.hex, &mut out).expect("canonical digest hex");
+        out
     }
 
     /// Two-character fan-out prefix used in object keys (spec §7.12).
