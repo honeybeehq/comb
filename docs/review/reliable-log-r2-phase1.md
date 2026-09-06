@@ -17,6 +17,10 @@ The review below identifies several contract differences that need interpretatio
 
 The current task file supplies the final R1 followups and authorizes catalog, v3 manifest, pages, follow and instance-owned session work after these fixes. Bridge capabilities remain false until that implementation and actual process acceptance pass.
 
+## Executed provider checks
+
+Root copied the existing phase-one comb-object test executable before launch, SHA256 `290e1504b490634455d49573f63edd41ab9c8a21a37b68607a96b169474bb3a9`. Its opt-in bounded-read conformance test passed on S3 and MinIO with actual backend configuration. [Receipt](../implementation/reliable-log/verification/r2-limited-live-phase1.json). This verifies that executable only, not subsequent worker edits or the final feed implementation. The test checks actual backend limits, but does not simulate a false Content-Length header.
+
 ## Independent fixed-commit review
 
 # R2 phase 1 review — bounded gets, wrappers, cache, decode preconditions

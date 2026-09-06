@@ -25,5 +25,24 @@
     "Stable retry range remains 1..1 and stores one exact payload"
   ],
   "scope": "R1 publication recovery only; not R2 bounded reads, writer sessions, Foundation transport or collection safety",
-  "executed_at": "2026-09-06T10:15:06.283523+00:00"
+  "executed_at": "2026-09-06T10:15:06.283523+00:00",
+  "root_rebuild_verification": {
+    "binary_sha256": "e61d281592d2f5dc36267e3de2b9e108b1e332250acb3a3b9c55d4fa8144b648",
+    "source_sha": "e61d872b735d24a5063e8af04abdbf76f211dd1a",
+    "root_build": "cargo test -p combctl --offline --test backend_drills --no-run --message-format=json",
+    "runs": [
+      {
+        "backend": "s3",
+        "exit_code": 0,
+        "elapsed_seconds": 6.376,
+        "prefix": "verification/r1-root-build-cbda7b43902048939994ee9da19027ee"
+      },
+      {
+        "backend": "minio",
+        "exit_code": 0,
+        "elapsed_seconds": 4.416,
+        "prefix": "verification/r1-root-build-edda75365b0c48c0953f16024d05c969"
+      }
+    ]
+  }
 }
