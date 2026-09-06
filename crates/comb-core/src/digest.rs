@@ -80,6 +80,12 @@ impl Digest {
         out
     }
 
+    pub fn from_raw(raw: [u8; 32]) -> Self {
+        Self {
+            hex: hex::encode(raw),
+        }
+    }
+
     /// Two-character fan-out prefix used in object keys (spec §7.12).
     pub fn key_prefix(&self) -> &str {
         &self.hex[..2]

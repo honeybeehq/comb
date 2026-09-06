@@ -1,9 +1,9 @@
 //! Comb Log: retry-safe append, group commit, and complete-feed stable keys.
 
-use crate::hamt::{self, Lookup, StableIndexEntry, StableIndexRoot};
+use crate::hamt::{self, IndexHead, Lookup, StableIndexEntry, StableIndexRoot};
 use crate::publish::{
-    identity_in_commit, outcome_from_view, CasResult, Companion, HeadSnapshot, PrepareCtx,
-    PreparedMutation, Published, RefMutationPlan, Upload,
+    identity_in_commit, outcome_from_view, persist_ref_state, CasResult, Companion, HeadSnapshot,
+    PrepareCtx, PreparedMutation, Published, RefMutationPlan, Upload,
 };
 use crate::store::Store;
 use anyhow::{anyhow, Result};
@@ -323,8 +323,10 @@ impl<'a> LogStore<'a> {
                             &index,
                             &key,
                             &self.logical,
-                            snapshot.value.generation,
-                            domain.head_seq,
+                            IndexHead {
+                                generation: snapshot.value.generation,
+                                head_seq: domain.head_seq,
+                            },
                         )
                         .await?
                     }
@@ -906,7 +908,17 @@ async fn prepare_events(
             generation: ctx.generation,
         };
         let idx = index.as_mut().expect("stable insert requires an index");
-        *idx = hamt::insert(ctx.store, idx, entry.clone(), logical).await?;
+        *idx = hamt::insert(
+            ctx.store,
+            idx,
+            entry.clone(),
+            logical,
+            IndexHead {
+                generation: ctx.snapshot.value.generation,
+                head_seq: domain.head_seq,
+            },
+        )
+        .await?;
         stable_admissions.push(entry);
         if leader_range.is_none() {
             leader_range = Some(AppendRange { first, last });
@@ -961,7 +973,7 @@ async fn prepare_events(
     next.updated_at = now;
 
     Ok(PreparedMutation {
-        next,
+        next: next.clone(),
         uploads: vec![
             Upload {
                 kind: ObjectKind::Blob,
@@ -975,7 +987,12 @@ async fn prepare_events(
             },
         ],
         commit_upload: Some(1),
-        change: serde_json::json!({ "kind": "append", "first": range.first, "last": range.last }),
+        change: serde_json::json!({
+            "kind": "append",
+            "first": range.first,
+            "last": range.last,
+            "ref_state": persist_ref_state(&next),
+        }),
         outcome: range,
         admitted,
         companions,
@@ -1095,10 +1112,14 @@ impl RefMutationPlan for TakeoverPlan {
         let _ = &self.logical;
         let _ = self.feed;
         Ok(PreparedMutation {
-            next,
+            next: next.clone(),
             uploads: Vec::new(),
             commit_upload: None,
-            change: serde_json::json!({ "kind": "takeover", "writer": self.writer }),
+            change: serde_json::json!({
+                "kind": "takeover",
+                "writer": self.writer,
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: EpochResult { epoch },
             admitted: Vec::new(),
             companions: Vec::new(),
@@ -1176,7 +1197,7 @@ impl RefMutationPlan for CompactPlan {
         next.generation = ctx.generation;
         next.updated_at = ctx.now;
         Ok(PreparedMutation {
-            next,
+            next: next.clone(),
             uploads: vec![
                 Upload {
                     kind: ObjectKind::Blob,
@@ -1190,7 +1211,11 @@ impl RefMutationPlan for CompactPlan {
                 },
             ],
             commit_upload: Some(1),
-            change: serde_json::json!({ "kind": "compact", "merged": merged }),
+            change: serde_json::json!({
+                "kind": "compact",
+                "merged": merged,
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: merged,
             admitted: Vec::new(),
             companions: Vec::new(),
@@ -1239,14 +1264,18 @@ impl RefMutationPlan for TrimPlan {
         next.updated_at = ctx.now;
         let _ = &self.logical;
         Ok(PreparedMutation {
-            next,
+            next: next.clone(),
             uploads: vec![Upload {
                 kind: ObjectKind::Blob,
                 schema: MANIFEST_SCHEMA.into(),
                 payload: serde_json::to_vec(&manifest)?,
             }],
             commit_upload: Some(0),
-            change: serde_json::json!({ "kind": "trim", "floor": floor }),
+            change: serde_json::json!({
+                "kind": "trim",
+                "floor": floor,
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: floor,
             admitted: Vec::new(),
             companions: Vec::new(),

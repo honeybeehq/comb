@@ -4,7 +4,8 @@ use chrono::{Duration, TimeZone, Utc};
 use comb_core::error::CoreError;
 use comb_core::operation::OpIdentity;
 use comb_core::{
-    DigestKey, FrozenClock, IntentState, OpIntent, OperationId, StableKey, MAX_STABLE_KEY_BYTES,
+    Commit, DigestKey, FrozenClock, IntentState, OpIntent, OperationId, StableKey,
+    MAX_STABLE_KEY_BYTES,
 };
 use comb_object::failpoint::{CountingBackend, FailpointBackend};
 use comb_object::memory::MemoryBackend;
@@ -552,4 +553,163 @@ async fn corrupt_stable_node_fails_closed() {
         "{err:#}"
     );
     let _ = rec;
+}
+
+#[tokio::test]
+async fn forged_applied_cache_is_not_canonical() {
+    let mem: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
+    let store = store_on(mem.clone());
+    let (digest, _) = store.put_blob(b"x".to_vec()).await.unwrap();
+    let op = store.mint_operation();
+    let first = store
+        .set_target(op, "r", digest.clone(), None)
+        .await
+        .unwrap();
+    let (payload, _) = store.get_blob(&first.commit).await.unwrap();
+    let mut commit: Commit = serde_json::from_slice(&payload).unwrap();
+    commit.change = serde_json::json!({
+        "kind": "set-target",
+        "target": digest,
+        "forged": true
+    });
+    let (fake, _) = store
+        .put_blob(serde_json::to_vec(&commit).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(fake, first.commit);
+    let key = store.intent_key(&OpIdentity::Generic(op));
+    let (bytes, version) = store.backend.get(&key).await.unwrap();
+    let mut intent: OpIntent = serde_json::from_slice(&bytes).unwrap();
+    if let IntentState::Applied { commit, .. } = &mut intent.state {
+        *commit = fake;
+    }
+    store
+        .backend
+        .put_update(
+            &key,
+            Some(&version),
+            &serde_json::to_vec_pretty(&intent).unwrap(),
+        )
+        .await
+        .unwrap();
+    let err = store.set_target(op, "r", digest, None).await.unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::RecoveryFailed(_))
+        ),
+        "{err:#}"
+    );
+}
+
+#[tokio::test]
+async fn applied_retry_restores_original_ref_value() {
+    let store = store_on(Arc::new(MemoryBackend::new()));
+    let (a, _) = store.put_blob(b"a".to_vec()).await.unwrap();
+    let (b, _) = store.put_blob(b"b".to_vec()).await.unwrap();
+    let claim_op = store.mint_operation();
+    let claimed = store
+        .claim(claim_op, "r", "writer", 60, false)
+        .await
+        .unwrap();
+    let lease = claimed.value.lease.clone();
+    store
+        .set_target(store.mint_operation(), "r", a.clone(), Some(claimed.epoch))
+        .await
+        .unwrap();
+    let stolen = store
+        .claim(store.mint_operation(), "r", "thief", 60, true)
+        .await
+        .unwrap();
+    let again = store
+        .claim(claim_op, "r", "writer", 60, false)
+        .await
+        .unwrap();
+    assert_eq!(again.generation, claimed.generation);
+    assert_eq!(again.value.lease, lease);
+    assert_eq!(again.value.target, claimed.value.target);
+    assert_eq!(again.value.epoch, claimed.epoch);
+
+    let set_op = store.mint_operation();
+    let set = store
+        .set_target(set_op, "r", a.clone(), Some(stolen.epoch))
+        .await
+        .unwrap();
+    store
+        .set_target(store.mint_operation(), "r", b.clone(), Some(stolen.epoch))
+        .await
+        .unwrap();
+    let set_again = store
+        .set_target(set_op, "r", a.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(set_again.value.target, Some(a.clone()));
+    assert_eq!(set_again.generation, set.generation);
+
+    let rel_op = store.mint_operation();
+    let live = store.read_ref("r").await.unwrap().unwrap().0;
+    let released = store.release(rel_op, "r", live.epoch).await.unwrap();
+    store
+        .claim(store.mint_operation(), "r", "later", 60, false)
+        .await
+        .unwrap();
+    let rel_again = store.release(rel_op, "r", live.epoch).await.unwrap();
+    assert_eq!(rel_again.generation, released.generation);
+    assert!(rel_again.value.lease.is_none());
+    assert_eq!(rel_again.value.target, released.value.target);
+}
+
+#[tokio::test]
+async fn stores_sharing_backend_keep_independent_clocks() {
+    let mem: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
+    let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let s1 = store_on(mem.clone()).with_clock(Arc::new(FrozenClock::new(now)));
+    let s2 = store_on(mem).with_clock(Arc::new(FrozenClock::new(now + Duration::days(8))));
+    let a = s1.mint_operation();
+    let b = s2.mint_operation();
+    assert!(a.issued_at() < b.issued_at());
+}
+
+#[tokio::test]
+async fn core_cannot_overwrite_log_owned_ref() {
+    let store = store_on(Arc::new(MemoryBackend::new()));
+    let log = LogStore::complete_feed(&store, "feed");
+    log.append_stable(sk("k"), "w", b"p", 60).await.unwrap();
+    let (digest, _) = store.put_blob(b"x".to_vec()).await.unwrap();
+    let err = store
+        .set_target(store.mint_operation(), "log/feed/p0", digest, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::Rejected(_))
+        ) || format!("{err:#}").contains("log-owned")
+            || format!("{err:#}").contains("log manifest"),
+        "{err:#}"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_ref_target_is_not_permission_to_overwrite() {
+    let mem: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
+    let store = store_on(mem.clone());
+    let (digest, _) = store.put_blob(b"x".to_vec()).await.unwrap();
+    store
+        .set_target(store.mint_operation(), "r", digest.clone(), None)
+        .await
+        .unwrap();
+    mem.delete(&store.object_key(&digest)).await.unwrap();
+    let (other, _) = store.put_blob(b"y".to_vec()).await.unwrap();
+    let err = store
+        .set_target(store.mint_operation(), "r", other, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::RecoveryFailed(_))
+        ),
+        "{err:#}"
+    );
 }

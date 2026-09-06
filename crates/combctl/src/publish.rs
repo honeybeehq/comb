@@ -577,7 +577,7 @@ impl Store {
                 )
                 .await;
             return Ok(PendingResolution::Done(
-                self.published_from_view(view, outcome, false),
+                self.published_from_view(view, outcome, false)?,
             ));
         }
         Ok(PendingResolution::Attempt { base: head_gen })
@@ -1221,23 +1221,36 @@ impl Store {
         commit: &Digest,
         cached: &serde_json::Value,
     ) -> Result<Published<T>> {
-        let view = self.load_commit_view(commit).await.map_err(|e| {
-            CoreError::RecoveryFailed(format!(
-                "applied intent {} commit {commit} is not recovery proof: {e:#}",
+        let snapshot = self
+            .read_head(resource)
+            .await?
+            .ok_or_else(|| CoreError::RecoveryFailed("applied intent but ref missing".into()))?;
+        let Some(head_commit) = snapshot.value.head_commit.clone() else {
+            return Err(CoreError::RecoveryFailed(format!(
+                "applied intent {} but ref {resource} has no head_commit",
                 identity.canonical()
             ))
-        })?;
+            .into());
+        };
+        if snapshot.value.generation < generation {
+            return Err(CoreError::RecoveryFailed(format!(
+                "applied cache generation {generation} is ahead of head {}",
+                snapshot.value.generation
+            ))
+            .into());
+        }
+        let (view, _) = self.seek_generation(&head_commit, generation).await?;
+        if view.digest != *commit {
+            return Err(CoreError::RecoveryFailed(format!(
+                "applied cache digest {commit} is not the canonical commit {} at generation {generation}",
+                view.digest
+            ))
+            .into());
+        }
         if view.header.resource != resource {
             return Err(CoreError::RecoveryFailed(format!(
                 "applied commit resource {} does not match {resource}",
                 view.header.resource
-            ))
-            .into());
-        }
-        if view.header.generation != generation {
-            return Err(CoreError::RecoveryFailed(format!(
-                "applied cache generation {generation} does not match commit {}",
-                view.header.generation
             ))
             .into());
         }
@@ -1272,7 +1285,7 @@ impl Store {
                 .into());
             }
         }
-        Ok(self.published_from_view(view, outcome, false))
+        self.published_from_view(view, outcome, false)
     }
 
     fn published_from_view<T>(
@@ -1280,15 +1293,15 @@ impl Store {
         view: CommitView,
         outcome: T,
         first_delivery: bool,
-    ) -> Published<T> {
-        Published {
+    ) -> Result<Published<T>> {
+        Ok(Published {
             generation: view.header.generation,
             epoch: view.header.epoch,
             commit: view.digest.clone(),
-            value: original_ref_value(&self.tenant, &view),
+            value: original_ref_value(&self.tenant, &view)?,
             outcome,
             first_delivery,
-        }
+        })
     }
 
     pub async fn history_chain(&self, name: &str, max: usize) -> Result<Vec<HistoryEntry>> {
@@ -1410,7 +1423,40 @@ fn intent_expiry(
     }
 }
 
-fn original_ref_value(tenant: &str, view: &CommitView) -> RefValue {
+pub(crate) fn persist_ref_state(next: &RefValue) -> serde_json::Value {
+    let mut v = next.clone();
+    v.head_commit = None;
+    serde_json::to_value(&v).unwrap_or(serde_json::Value::Null)
+}
+
+fn original_ref_value(tenant: &str, view: &CommitView) -> Result<RefValue> {
+    if let Some(state) = view.change.get("ref_state") {
+        let mut value: RefValue = serde_json::from_value(state.clone())
+            .map_err(|e| CoreError::RecoveryFailed(format!("commit ref_state: {e}")))?;
+        if value.tenant != tenant {
+            return Err(CoreError::RecoveryFailed(format!(
+                "commit ref_state tenant {} does not match {tenant}",
+                value.tenant
+            ))
+            .into());
+        }
+        if value.name != view.header.resource {
+            return Err(CoreError::RecoveryFailed(format!(
+                "commit ref_state name {} does not match {}",
+                value.name, view.header.resource
+            ))
+            .into());
+        }
+        if value.generation != view.header.generation {
+            return Err(CoreError::RecoveryFailed(format!(
+                "commit ref_state generation {} does not match header {}",
+                value.generation, view.header.generation
+            ))
+            .into());
+        }
+        value.head_commit = Some(view.digest.clone());
+        return Ok(value);
+    }
     let mut value = RefValue::new(tenant, &view.header.resource);
     value.generation = view.header.generation;
     value.epoch = view.header.epoch;
@@ -1426,7 +1472,7 @@ fn original_ref_value(tenant: &str, view: &CommitView) -> RefValue {
     {
         value.target = Some(t);
     }
-    value
+    Ok(value)
 }
 
 pub(crate) fn identity_in_commit(view: &CommitView, identity: &OpIdentity) -> bool {

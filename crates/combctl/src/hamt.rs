@@ -22,9 +22,17 @@ pub const MAX_STABLE_ADMISSIONS: usize = 1_024;
 pub const MAX_STABLE_ADMISSION_BYTES: usize = 256 * 1024;
 const FANOUT_BITS: u32 = 5;
 const FANOUT: u8 = 32;
-/// Last legal depth (0-based). Depth 52 would be a 53rd node past 256 bits.
-pub const MAX_DEPTH: usize = 51;
+/// Last nibble index. A branch may sit at depths 0..=51.
+pub const MAX_BRANCH_DEPTH: usize = 51;
+/// Leaf under nibble 51 is at walk depth 52.
+pub const MAX_LEAF_DEPTH: usize = 52;
 const PATH_BITS: usize = 256;
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexHead {
+    pub generation: u64,
+    pub head_seq: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +77,8 @@ pub struct StableIndexEntry {
 enum HamtNode {
     Branch {
         schema: String,
+        depth: u8,
+        prefix: Digest,
         children: Vec<HamtChild>,
     },
     Leaf {
@@ -97,10 +107,7 @@ pub enum Lookup {
 pub async fn empty_root(store: &Store) -> Result<StableIndexRoot> {
     let digest = put_node(
         store,
-        &HamtNode::Branch {
-            schema: NODE_SCHEMA.into(),
-            children: Vec::new(),
-        },
+        &branch_node(0, &Digest::from_raw([0u8; 32]), Vec::new()),
     )
     .await?;
     Ok(StableIndexRoot::new(digest, 0))
@@ -111,21 +118,11 @@ pub async fn lookup(
     root: &StableIndexRoot,
     key: &StableKey,
     logical_log: &str,
-    head_generation: u64,
-    head_seq: u64,
+    head: IndexHead,
 ) -> Result<Lookup> {
     root.validate()?;
     let path = key.path_digest(&store.key, &store.tenant, logical_log);
-    lookup_at(
-        store,
-        root,
-        key,
-        &path,
-        logical_log,
-        head_generation,
-        head_seq,
-    )
-    .await
+    lookup_at(store, root, key, &path, logical_log, head).await
 }
 
 fn lookup_at<'a>(
@@ -134,20 +131,19 @@ fn lookup_at<'a>(
     key: &'a StableKey,
     path: &'a Digest,
     logical_log: &'a str,
-    head_generation: u64,
-    head_seq: u64,
+    head: IndexHead,
 ) -> Pin<Box<dyn Future<Output = Result<Lookup>> + Send + 'a>> {
     Box::pin(async move {
         let mut digest = root.digest.clone();
         let mut depth = 0usize;
         loop {
-            if depth > MAX_DEPTH {
+            if depth > MAX_LEAF_DEPTH {
                 return Err(CoreError::IntegrityError(
                     "stable index exceeds maximum path depth".into(),
                 )
                 .into());
             }
-            let node = load_node(store, &digest).await?;
+            let node = load_node(store, &digest, path, depth, Some(head), logical_log).await?;
             if depth == 0 {
                 match &node {
                     HamtNode::Branch { children, .. } => {
@@ -176,14 +172,6 @@ fn lookup_at<'a>(
                     generation,
                     ..
                 } => {
-                    let leaf_path = existing.path_digest(&store.key, &store.tenant, logical_log);
-                    if !path_prefix_matches(&leaf_path, path, depth)? {
-                        return Err(CoreError::IntegrityError(
-                            "stable index leaf is not on the path that reached it".into(),
-                        )
-                        .into());
-                    }
-                    validate_receipt(first, last, generation, head_generation, head_seq)?;
                     if &existing == key {
                         if root.entries == 0 {
                             return Err(CoreError::IntegrityError(
@@ -202,7 +190,12 @@ fn lookup_at<'a>(
                     return Ok(Lookup::Absent);
                 }
                 HamtNode::Branch { children, .. } => {
-                    validate_branch_slots(&children, depth)?;
+                    if depth > MAX_BRANCH_DEPTH {
+                        return Err(CoreError::IntegrityError(
+                            "stable index branch exceeds nibble depth".into(),
+                        )
+                        .into());
+                    }
                     let slot = nibble(path, depth)?;
                     match child(&children, slot) {
                         None => return Ok(Lookup::Absent),
@@ -222,6 +215,7 @@ pub async fn insert(
     root: &StableIndexRoot,
     entry: StableIndexEntry,
     logical_log: &str,
+    head: IndexHead,
 ) -> Result<StableIndexRoot> {
     root.validate()?;
     validate_receipt(
@@ -241,6 +235,7 @@ pub async fn insert(
         &path,
         logical_log,
         0,
+        head,
     )
     .await?;
     let entries = root
@@ -257,17 +252,15 @@ fn insert_at<'a>(
     path: &'a Digest,
     logical_log: &'a str,
     depth: usize,
+    head: IndexHead,
 ) -> Pin<Box<dyn Future<Output = Result<Digest>> + Send + 'a>> {
     Box::pin(async move {
-        if depth > MAX_DEPTH {
+        if depth > MAX_LEAF_DEPTH {
             return Err(CoreError::Rejected("stable key path hash collision".into()).into());
         }
         let node = match &current {
-            Some(d) => load_node(store, d).await?,
-            None => HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: Vec::new(),
-            },
+            Some(d) => load_node(store, d, path, depth, Some(head), logical_log).await?,
+            None => branch_node(depth, path, Vec::new()),
         };
         match node {
             HamtNode::Leaf {
@@ -284,7 +277,7 @@ fn insert_at<'a>(
                     )
                     .into());
                 }
-                if depth == MAX_DEPTH {
+                if depth >= MAX_LEAF_DEPTH {
                     return Err(CoreError::Rejected("stable key path hash collision".into()).into());
                 }
                 let old = StableIndexEntry {
@@ -295,37 +288,25 @@ fn insert_at<'a>(
                     generation,
                 };
                 let old_path = old.key.path_digest(&store.key, &store.tenant, logical_log);
-                split(store, &old, &old_path, entry, path, logical_log, depth).await
+                split(store, &old, &old_path, entry, path, depth, head).await
             }
             HamtNode::Branch { mut children, .. } => {
-                validate_branch_slots(&children, depth)?;
+                if depth > MAX_BRANCH_DEPTH {
+                    return Err(CoreError::Rejected("stable key path hash collision".into()).into());
+                }
                 let slot = nibble(path, depth)?;
                 match child(&children, slot).cloned() {
                     None => {
                         let leaf = put_node(store, &leaf_node(entry)).await?;
                         upsert_child(&mut children, slot, leaf);
-                        put_node(
-                            store,
-                            &HamtNode::Branch {
-                                schema: NODE_SCHEMA.into(),
-                                children,
-                            },
-                        )
-                        .await
+                        put_node(store, &branch_node(depth, path, children)).await
                     }
                     Some(next) => {
                         let updated =
-                            insert_at(store, Some(next), entry, path, logical_log, depth + 1)
+                            insert_at(store, Some(next), entry, path, logical_log, depth + 1, head)
                                 .await?;
                         upsert_child(&mut children, slot, updated);
-                        put_node(
-                            store,
-                            &HamtNode::Branch {
-                                schema: NODE_SCHEMA.into(),
-                                children,
-                            },
-                        )
-                        .await
+                        put_node(store, &branch_node(depth, path, children)).await
                     }
                 }
             }
@@ -339,13 +320,21 @@ fn split<'a>(
     a_path: &'a Digest,
     b: &'a StableIndexEntry,
     b_path: &'a Digest,
-    _logical_log: &'a str,
     depth: usize,
+    head: IndexHead,
 ) -> Pin<Box<dyn Future<Output = Result<Digest>> + Send + 'a>> {
     Box::pin(async move {
-        if depth > MAX_DEPTH {
+        if depth > MAX_BRANCH_DEPTH {
             return Err(CoreError::Rejected("stable key path hash collision".into()).into());
         }
+        validate_receipt(
+            a.first,
+            a.last,
+            a.generation,
+            head.generation,
+            head.head_seq,
+        )?;
+        validate_receipt(b.first, b.last, b.generation, b.generation, b.last)?;
         let sa = nibble(a_path, depth)?;
         let sb = nibble(b_path, depth)?;
         if sa != sb {
@@ -354,26 +343,12 @@ fn split<'a>(
             let mut children = Vec::new();
             upsert_child(&mut children, sa, da);
             upsert_child(&mut children, sb, db);
-            return put_node(
-                store,
-                &HamtNode::Branch {
-                    schema: NODE_SCHEMA.into(),
-                    children,
-                },
-            )
-            .await;
+            return put_node(store, &branch_node(depth, a_path, children)).await;
         }
-        let child = split(store, a, a_path, b, b_path, _logical_log, depth + 1).await?;
+        let child = split(store, a, a_path, b, b_path, depth + 1, head).await?;
         let mut children = Vec::new();
         upsert_child(&mut children, sa, child);
-        put_node(
-            store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children,
-            },
-        )
-        .await
+        put_node(store, &branch_node(depth, a_path, children)).await
     })
 }
 
@@ -386,6 +361,26 @@ fn leaf_node(entry: &StableIndexEntry) -> HamtNode {
         last: entry.last,
         generation: entry.generation,
     }
+}
+
+fn branch_node(depth: usize, path: &Digest, children: Vec<HamtChild>) -> HamtNode {
+    HamtNode::Branch {
+        schema: NODE_SCHEMA.into(),
+        depth: depth as u8,
+        prefix: masked_path(path, depth),
+        children,
+    }
+}
+
+fn masked_path(path: &Digest, depth: usize) -> Digest {
+    let mut raw = path.raw();
+    let keep_bits = depth.saturating_mul(FANOUT_BITS as usize).min(PATH_BITS);
+    for bit in keep_bits..PATH_BITS {
+        let byte = bit / 8;
+        let mask = 1u8 << (7 - (bit % 8));
+        raw[byte] &= !mask;
+    }
+    Digest::from_raw(raw)
 }
 
 fn child(children: &[HamtChild], slot: u8) -> Option<&Digest> {
@@ -402,7 +397,7 @@ fn upsert_child(children: &mut Vec<HamtChild>, slot: u8, digest: Digest) {
 }
 
 fn nibble(path: &Digest, depth: usize) -> Result<u8, CoreError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_BRANCH_DEPTH {
         return Err(CoreError::Rejected("stable key path depth".into()));
     }
     let raw = path.raw();
@@ -499,15 +494,35 @@ fn validate_branch_slots(children: &[HamtChild], depth: usize) -> Result<(), Cor
     Ok(())
 }
 
-fn validate_node(digest: &Digest, node: &HamtNode) -> Result<(), CoreError> {
+fn validate_node(
+    digest: &Digest,
+    node: &HamtNode,
+    path: &Digest,
+    depth: usize,
+) -> Result<(), CoreError> {
     match node {
-        HamtNode::Branch { schema, children } => {
+        HamtNode::Branch {
+            schema,
+            depth: node_depth,
+            prefix,
+            children,
+        } => {
             if schema != NODE_SCHEMA {
                 return Err(CoreError::IntegrityError(format!(
                     "unsupported stable index node schema {schema} at {digest}"
                 )));
             }
-            let _ = children;
+            if *node_depth as usize != depth {
+                return Err(CoreError::IntegrityError(format!(
+                    "stable index branch depth {node_depth} does not match walk {depth}"
+                )));
+            }
+            if prefix != &masked_path(path, depth) {
+                return Err(CoreError::IntegrityError(
+                    "stable index branch is not bound to the path that reached it".into(),
+                ));
+            }
+            validate_branch_slots(children, depth)?;
             Ok(())
         }
         HamtNode::Leaf {
@@ -532,7 +547,14 @@ fn validate_node(digest: &Digest, node: &HamtNode) -> Result<(), CoreError> {
     }
 }
 
-async fn load_node(store: &Store, digest: &Digest) -> Result<HamtNode> {
+async fn load_node(
+    store: &Store,
+    digest: &Digest,
+    path: &Digest,
+    depth: usize,
+    head: Option<IndexHead>,
+    logical_log: &str,
+) -> Result<HamtNode> {
     let (payload, _) = match store.get_blob(digest).await {
         Ok(v) => v,
         Err(e) => return Err(map_node_load_err(digest, e)),
@@ -546,22 +568,50 @@ async fn load_node(store: &Store, digest: &Digest) -> Result<HamtNode> {
     let node: HamtNode = serde_json::from_slice(&payload).map_err(|e| {
         CoreError::IntegrityError(format!("stable index node {digest} is malformed: {e}"))
     })?;
-    validate_node(digest, &node)?;
+    validate_node(digest, &node, path, depth)?;
+    if let HamtNode::Leaf {
+        key,
+        first,
+        last,
+        generation,
+        ..
+    } = &node
+    {
+        let leaf_path = key.path_digest(&store.key, &store.tenant, logical_log);
+        if !path_prefix_matches(&leaf_path, path, depth)? {
+            return Err(CoreError::IntegrityError(
+                "stable index leaf is not on the path that reached it".into(),
+            )
+            .into());
+        }
+        if let Some(head) = head {
+            validate_receipt(*first, *last, *generation, head.generation, head.head_seq)?;
+        }
+    }
     Ok(node)
 }
 
 fn map_node_load_err(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
-    let unavailable = matches!(
-        e.downcast_ref::<CoreError>(),
-        Some(CoreError::BackendUnavailable(_))
-    );
-    if unavailable {
-        return e;
+    match e.downcast_ref::<CoreError>() {
+        Some(CoreError::BackendUnavailable(_)) => e,
+        Some(CoreError::Io(_)) => {
+            CoreError::BackendUnavailable(format!("stable index node {digest}: {e:#}")).into()
+        }
+        Some(CoreError::NotFound(_)) => {
+            CoreError::IntegrityError(format!("stable index node {digest} is missing")).into()
+        }
+        Some(CoreError::IntegrityError(_) | CoreError::InvalidFormat(_)) => {
+            CoreError::IntegrityError(format!("stable index node {digest}: {e:#}")).into()
+        }
+        Some(_) => CoreError::RecoveryFailed(format!(
+            "unclassified error loading stable index node {digest}: {e:#}"
+        ))
+        .into(),
+        None => CoreError::RecoveryFailed(format!(
+            "unclassified error loading stable index node {digest}: {e:#}"
+        ))
+        .into(),
     }
-    if matches!(e.downcast_ref::<CoreError>(), Some(CoreError::NotFound(_))) {
-        return CoreError::IntegrityError(format!("stable index node {digest} is missing")).into();
-    }
-    CoreError::IntegrityError(format!("stable index node {digest}: {e:#}")).into()
 }
 
 async fn put_node(store: &Store, node: &HamtNode) -> Result<Digest> {
@@ -637,12 +687,19 @@ mod tests {
         }
     }
 
+    fn head(generation: u64, head_seq: u64) -> IndexHead {
+        IndexHead {
+            generation,
+            head_seq,
+        }
+    }
+
     #[test]
     fn depth_boundary_is_51() {
         let d = DigestKey::from_bytes([1u8; 32]).digest(b"path");
-        assert!(nibble(&d, MAX_DEPTH).is_ok());
-        assert!(nibble(&d, MAX_DEPTH + 1).is_err());
-        assert_eq!(slot_mask(MAX_DEPTH), 0b10000);
+        assert!(nibble(&d, MAX_BRANCH_DEPTH).is_ok());
+        assert!(nibble(&d, MAX_BRANCH_DEPTH + 1).is_err());
+        assert_eq!(slot_mask(MAX_BRANCH_DEPTH), 0b10000);
         assert_eq!(slot_mask(0), 0b11111);
     }
 
@@ -650,7 +707,7 @@ mod tests {
     async fn missing_child_on_verified_path_is_absent() {
         let store = store();
         let root = empty_root(&store).await.unwrap();
-        let found = lookup(&store, &root, &key("a"), "feed", 0, 0)
+        let found = lookup(&store, &root, &key("a"), "feed", head(0, 0))
             .await
             .unwrap();
         assert!(matches!(found, Lookup::Absent));
@@ -665,18 +722,21 @@ mod tests {
         let slot = nibble(&path, 0).unwrap();
         let digest = put_node(
             &store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: vec![HamtChild {
+            &branch_node(
+                0,
+                &path,
+                vec![HamtChild {
                     slot,
                     digest: missing,
                 }],
-            },
+            ),
         )
         .await
         .unwrap();
         let root = StableIndexRoot::new(digest, 1);
-        let err = lookup(&store, &root, &k, "feed", 1, 1).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(1, 1))
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err.downcast_ref::<CoreError>(),
@@ -706,20 +766,22 @@ mod tests {
         }
         assert_ne!(slot_a, slot_b, "test needs distinct first nibbles");
         let leaf_b = put_node(&store, &leaf_node(&b)).await.unwrap();
+        let path_a = a.key.path_digest(&store.key, &store.tenant, "feed");
         let digest = put_node(
             &store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: vec![HamtChild {
+            &branch_node(
+                0,
+                &path_a,
+                vec![HamtChild {
                     slot: slot_a,
                     digest: leaf_b,
                 }],
-            },
+            ),
         )
         .await
         .unwrap();
         let root = StableIndexRoot::new(digest, 1);
-        let err = lookup(&store, &root, &a.key, "feed", 1, 1)
+        let err = lookup(&store, &root, &a.key, "feed", head(1, 1))
             .await
             .unwrap_err();
         assert!(
@@ -752,15 +814,14 @@ mod tests {
         .unwrap();
         let digest = put_node(
             &store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: vec![HamtChild { slot, digest: leaf }],
-            },
+            &branch_node(0, &path, vec![HamtChild { slot, digest: leaf }]),
         )
         .await
         .unwrap();
         let root = StableIndexRoot::new(digest, 1);
-        let err = lookup(&store, &root, &k, "feed", 10, 10).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(10, 10))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
             Some(CoreError::IntegrityError(_))
@@ -768,9 +829,10 @@ mod tests {
 
         let unsorted = put_node(
             &store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: vec![
+            &branch_node(
+                0,
+                &path,
+                vec![
                     HamtChild {
                         slot: 3,
                         digest: hash(&store),
@@ -780,12 +842,14 @@ mod tests {
                         digest: hash(&store),
                     },
                 ],
-            },
+            ),
         )
         .await
         .unwrap();
         let root = StableIndexRoot::new(unsorted, 1);
-        let err = lookup(&store, &root, &k, "feed", 1, 1).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(1, 1))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
             Some(CoreError::IntegrityError(_))
@@ -793,18 +857,21 @@ mod tests {
 
         let wide = put_node(
             &store,
-            &HamtNode::Branch {
-                schema: NODE_SCHEMA.into(),
-                children: vec![HamtChild {
+            &branch_node(
+                0,
+                &path,
+                vec![HamtChild {
                     slot: 32,
                     digest: hash(&store),
                 }],
-            },
+            ),
         )
         .await
         .unwrap();
         let root = StableIndexRoot::new(wide, 1);
-        let err = lookup(&store, &root, &k, "feed", 1, 1).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(1, 1))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
             Some(CoreError::IntegrityError(_))
@@ -814,19 +881,25 @@ mod tests {
             &store,
             &HamtNode::Branch {
                 schema: "comb.log.stable-index-node/v0".into(),
+                depth: 0,
+                prefix: masked_path(&path, 0),
                 children: Vec::new(),
             },
         )
         .await
         .unwrap();
         let mut root = StableIndexRoot::new(unknown, 0);
-        let err = lookup(&store, &root, &k, "feed", 0, 0).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(0, 0))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
             Some(CoreError::IntegrityError(_))
         ));
         root.schema = "nope".into();
-        let err = lookup(&store, &root, &k, "feed", 0, 0).await.unwrap_err();
+        let err = lookup(&store, &root, &k, "feed", head(0, 0))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
             Some(CoreError::IntegrityError(_))
@@ -838,8 +911,8 @@ mod tests {
         let store = store();
         let mut root = empty_root(&store).await.unwrap();
         let e = entry(&store, "a", 1, 4, 2);
-        root = insert(&store, &root, e, "feed").await.unwrap();
-        let err = lookup(&store, &root, &key("a"), "feed", 1, 2)
+        root = insert(&store, &root, e, "feed", head(2, 4)).await.unwrap();
+        let err = lookup(&store, &root, &key("a"), "feed", head(1, 2))
             .await
             .unwrap_err();
         assert!(
@@ -856,8 +929,13 @@ mod tests {
         let store = store();
         let mut root = empty_root(&store).await.unwrap();
         let e = entry(&store, "doc", 1, 1, 1);
-        root = insert(&store, &root, e.clone(), "feed").await.unwrap();
-        match lookup(&store, &root, &e.key, "feed", 1, 1).await.unwrap() {
+        root = insert(&store, &root, e.clone(), "feed", head(1, 1))
+            .await
+            .unwrap();
+        match lookup(&store, &root, &e.key, "feed", head(1, 1))
+            .await
+            .unwrap()
+        {
             Lookup::Found(got) => {
                 assert_eq!(got.first, 1);
                 assert_eq!(got.generation, 1);
@@ -865,10 +943,137 @@ mod tests {
             Lookup::Absent => panic!("expected found"),
         }
         assert!(matches!(
-            lookup(&store, &root, &key("other"), "feed", 1, 1)
+            lookup(&store, &root, &key("other"), "feed", head(1, 1))
                 .await
                 .unwrap(),
             Lookup::Absent
         ));
+    }
+
+    #[test]
+    fn io_is_unavailable_not_integrity() {
+        let d = Digest::from_raw([0u8; 32]);
+        let e = anyhow::Error::from(CoreError::Io(std::io::Error::other("eio")));
+        let out = map_node_load_err(&d, e);
+        assert!(
+            matches!(
+                out.downcast_ref::<CoreError>(),
+                Some(CoreError::BackendUnavailable(_))
+            ),
+            "{out:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grafted_branch_is_integrity_not_absent() {
+        let store = store();
+        let mut a = entry(&store, "alpha", 1, 1, 1);
+        let mut b = entry(&store, "beta", 1, 1, 1);
+        let mut path_a = a.key.path_digest(&store.key, &store.tenant, "feed");
+        let mut path_b = b.key.path_digest(&store.key, &store.tenant, "feed");
+        for i in 0..256u16 {
+            path_a = a.key.path_digest(&store.key, &store.tenant, "feed");
+            path_b = b.key.path_digest(&store.key, &store.tenant, "feed");
+            if nibble(&path_a, 0).unwrap() != nibble(&path_b, 0).unwrap() {
+                break;
+            }
+            a = entry(&store, &format!("ga{i}"), 1, 1, 1);
+            b = entry(&store, &format!("gb{i}"), 1, 1, 1);
+        }
+        let grafted = put_node(&store, &branch_node(1, &path_b, Vec::new()))
+            .await
+            .unwrap();
+        let digest = put_node(
+            &store,
+            &branch_node(
+                0,
+                &path_a,
+                vec![HamtChild {
+                    slot: nibble(&path_a, 0).unwrap(),
+                    digest: grafted,
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+        let root = StableIndexRoot::new(digest, 1);
+        let err = lookup(&store, &root, &a.key, "feed", head(1, 1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(_))
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_copy_validates_existing_leaf_range() {
+        let store = store();
+        let mut a = entry(&store, "share-a", 1, 1, 1);
+        let mut b = entry(&store, "share-b", 1, 9, 1);
+        for i in 0..64u16 {
+            a = entry(&store, &format!("sa{i}"), 1, 1, 1);
+            b = entry(&store, &format!("sb{i}"), 1, 9, 1);
+            let pa = a.key.path_digest(&store.key, &store.tenant, "feed");
+            let pb = b.key.path_digest(&store.key, &store.tenant, "feed");
+            if nibble(&pa, 0).unwrap() == nibble(&pb, 0).unwrap() {
+                break;
+            }
+        }
+        let bad = put_node(&store, &leaf_node(&b)).await.unwrap();
+        let pa = a.key.path_digest(&store.key, &store.tenant, "feed");
+        let slot = nibble(&pa, 0).unwrap();
+        let digest = put_node(
+            &store,
+            &branch_node(0, &pa, vec![HamtChild { slot, digest: bad }]),
+        )
+        .await
+        .unwrap();
+        let root = StableIndexRoot::new(digest, 1);
+        let err = insert(&store, &root, a, "feed", head(1, 1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(_))
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn constructed_path_leaf_at_depth_52() {
+        let store = store();
+        let e = entry(&store, "deep", 1, 1, 1);
+        let path = e.key.path_digest(&store.key, &store.tenant, "feed");
+        let mut child = put_node(&store, &leaf_node(&e)).await.unwrap();
+        for d in (0..=MAX_BRANCH_DEPTH).rev() {
+            let slot = nibble(&path, d).unwrap();
+            child = put_node(
+                &store,
+                &branch_node(
+                    d,
+                    &path,
+                    vec![HamtChild {
+                        slot,
+                        digest: child,
+                    }],
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        let root = StableIndexRoot::new(child, 1);
+        match lookup(&store, &root, &e.key, "feed", head(1, 1))
+            .await
+            .unwrap()
+        {
+            Lookup::Found(got) => assert_eq!(got.generation, 1),
+            Lookup::Absent => panic!("depth-52 leaf must be reachable"),
+        }
     }
 }

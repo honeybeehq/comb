@@ -1,10 +1,12 @@
-use crate::publish::{HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan};
+use crate::publish::{
+    persist_ref_state, HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan,
+};
 use anyhow::Result;
 use comb_core::error::CoreError;
 use comb_core::operation::{
     Clock, Material, OpIdentity, OperationId, OperationPolicy, SystemClock,
 };
-use comb_core::{Digest, DigestKey, Envelope, ObjectKind, RefValue};
+use comb_core::{Digest, DigestKey, Envelope, ObjectKind, RefValue, LOG_MANIFEST_SCHEMA};
 use comb_object::{ObjectBackend, Version};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -261,6 +263,8 @@ impl RefMutationPlan for SetTargetPlan {
     }
 
     async fn prepare(&self, ctx: PrepareCtx<'_>) -> Result<PreparedMutation<Self::Outcome>> {
+        reject_core_on_log_ref(&self.name)?;
+        reject_existing_log_manifest(ctx.store, &ctx.snapshot.value).await?;
         let now = ctx.now;
         let current = &ctx.snapshot.value;
         if let Some(f) = self.fence {
@@ -287,7 +291,11 @@ impl RefMutationPlan for SetTargetPlan {
             next: next.clone(),
             uploads: Vec::new(),
             commit_upload: None,
-            change: serde_json::json!({ "kind": "set-target", "target": self.target }),
+            change: serde_json::json!({
+                "kind": "set-target",
+                "target": self.target,
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: MutationResult {
                 generation: ctx.generation,
                 epoch: next.epoch,
@@ -358,7 +366,12 @@ impl RefMutationPlan for ClaimPlan {
             next: next.clone(),
             uploads: Vec::new(),
             commit_upload: None,
-            change: serde_json::json!({ "kind": "claim", "writer": self.writer, "steal": self.steal }),
+            change: serde_json::json!({
+                "kind": "claim",
+                "writer": self.writer,
+                "steal": self.steal,
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: MutationResult {
                 generation: ctx.generation,
                 epoch: next.epoch,
@@ -406,7 +419,10 @@ impl RefMutationPlan for ReleasePlan {
             next: next.clone(),
             uploads: Vec::new(),
             commit_upload: None,
-            change: serde_json::json!({ "kind": "release" }),
+            change: serde_json::json!({
+                "kind": "release",
+                "ref_state": persist_ref_state(&next),
+            }),
             outcome: MutationResult {
                 generation: ctx.generation,
                 epoch: next.epoch,
@@ -414,5 +430,35 @@ impl RefMutationPlan for ReleasePlan {
             admitted: Vec::new(),
             companions: Vec::new(),
         })
+    }
+}
+
+fn reject_core_on_log_ref(name: &str) -> Result<()> {
+    if name.starts_with("log/") {
+        return Err(CoreError::Rejected("log-owned ref; mutate through LogStore".into()).into());
+    }
+    Ok(())
+}
+
+async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Result<()> {
+    let Some(target) = &current.target else {
+        return Ok(());
+    };
+    match store.get_blob(target).await {
+        Ok((payload, _)) => {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                if value.get("schema").and_then(|s| s.as_str()) == Some(LOG_MANIFEST_SCHEMA) {
+                    return Err(CoreError::Rejected(
+                        "ref holds a log manifest; Core mutations cannot overwrite it".into(),
+                    )
+                    .into());
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(CoreError::RecoveryFailed(format!(
+            "ref target {target} unreadable; refusing overwrite: {e:#}"
+        ))
+        .into()),
     }
 }
