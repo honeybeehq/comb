@@ -1416,6 +1416,7 @@ impl WriterSession {
             }
             match timed_cas(
                 call,
+                &self.loss,
                 self.feed.store.commit_at_snapshot(
                     OpIdentity::Stable(key.clone()),
                     CompleteAppendPlan {
@@ -1501,10 +1502,16 @@ impl Drop for WriterSession {
 
 async fn timed_cas<T>(
     call: &CallContext,
+    loss: &CancellationToken,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, StableAppendError> {
     if call.cancellation.is_cancelled() {
         return Err(StableAppendError::Cancelled);
+    }
+    if loss.is_cancelled() {
+        return Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
+            cause: SessionLoss::LeaseExpired,
+        }));
     }
     if tokio::time::Instant::now() >= call.deadline {
         return Err(StableAppendError::DeadlineExceeded);
@@ -1512,6 +1519,9 @@ async fn timed_cas<T>(
     tokio::select! {
         biased;
         _ = call.cancellation.cancelled() => Err(StableAppendError::Cancelled),
+        _ = loss.cancelled() => Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
+            cause: SessionLoss::LeaseExpired,
+        })),
         _ = tokio::time::sleep_until(call.deadline) => Err(StableAppendError::DeadlineExceeded),
         r = fut => r.map_err(cas_from_anyhow),
     }

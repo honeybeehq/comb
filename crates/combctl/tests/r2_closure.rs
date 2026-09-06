@@ -969,7 +969,7 @@ async fn review_lost_session_cannot_finish_suspended_append() {
 }
 
 #[tokio::test]
-async fn review_lost_session_terminates_blocked_append_without_resume() {
+async fn review_lost_session_returns_while_upload_stays_blocked() {
     let backend = Arc::new(PausedRefRead::new());
     let store = Arc::new(Store::new(
         backend.clone(),
@@ -992,7 +992,7 @@ async fn review_lost_session_terminates_blocked_append_without_resume() {
     );
     writer.ready(&call()).await.unwrap();
     backend.pause_write.store(true, Ordering::SeqCst);
-    let pending = {
+    let mut pending = {
         let writer = writer.clone();
         tokio::spawn(async move {
             writer
@@ -1019,9 +1019,13 @@ async fn review_lost_session_terminates_blocked_append_without_resume() {
     })
     .await
     .unwrap();
-    let got = tokio::time::timeout(Duration::from_millis(400), pending).await;
+    let got = tokio::time::timeout(Duration::from_millis(250), &mut pending).await;
+    if got.is_err() {
+        pending.abort();
+        let _ = pending.await;
+    }
     assert!(
         matches!(got, Ok(Ok(Err(_)))),
-        "Lost append waited for blocked upload: {got:?}"
+        "Lost append kept waiting for backend I/O: {got:?}"
     );
 }
