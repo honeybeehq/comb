@@ -282,3 +282,11 @@ Validation so far covers fixtures, the bridge acceptance client and the local Ph
 ## Store runtime ownership follow-up
 
 StoreRuntime currently lives in a process-global map keyed by backend Arc address and tenant. Two Store values sharing a backend and tenant overwrite each other's clock and policy. The registry also keeps entries after backend drop, so allocator address reuse can give an unrelated Store an old test clock or expiry policy. These settings govern lease and operation validity. Store must own its clock and policy fields. Update existing struct literals to Store::new rather than preserving them through a pointer-keyed registry. Test independent settings on two Store values that share a backend and tenant.
+
+## Root follow-up on retry evidence
+
+Loading the Applied cache's named commit is not proof that its publication CAS succeeded. Commit uploads precede that CAS. Recovery must compare the cached digest with the canonical commit at its claimed generation. An uploaded but uncommitted candidate must not authorize an Applied receipt.
+
+The revised published_from_view still reconstructs lease as None and derives plain-ref target from change.target. Claim and release retries therefore lose parts of the original RefValue. Persist the original typed ref state without its self-referential head_commit, then fill head_commit from the verified commit digest. Compare the complete returned value after later mutations and takeover.
+
+The attempted Log ownership helper also returns success when the current target is unreadable or malformed. Core set_target must not treat missing required Log evidence as permission to overwrite it. The bridge's overflow fixture now uses direct isolated backend seeding, so it requires no production ownership exception.
