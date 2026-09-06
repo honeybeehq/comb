@@ -193,13 +193,17 @@ impl Store {
                 Ok(env) if env.meta.digest == *digest => {
                     return Ok((env.payload, GetSource::Cache));
                 }
-                Ok(_) | Err(CoreError::IntegrityError(_)) | Err(CoreError::InvalidFormat(_)) => {
+                Err(e @ CoreError::ObjectTooLarge { .. })
+                    if cache_plaintext_cap_is_authoritative(&bytes, digest, &self.key, spec) =>
+                {
+                    return Err(size_key(e, &object_key).into());
+                }
+                Ok(_) | Err(_) => {
                     self.cache_quarantine(digest);
                     eprintln!(
                         "warning: cache entry for {digest} failed verification — quarantined, refetching from backend"
                     );
                 }
-                Err(e) => return Err(size_key(e, &object_key).into()),
             },
             Ok(None) => {}
             Err(CoreError::ObjectTooLarge { .. }) => {
@@ -408,6 +412,25 @@ fn size_key(err: CoreError, object_key: &str) -> CoreError {
         },
         other => other,
     }
+}
+
+/// Digest-matched objects that are genuinely over the plaintext cap must fail
+/// closed without quarantine: the backend copy is identical. Forged declared
+/// sizes whose actual suffix still fits (or whose digest does not match) are
+/// cache poison and fall through to refetch.
+fn cache_plaintext_cap_is_authoritative(
+    bytes: &[u8],
+    digest: &Digest,
+    key: &DigestKey,
+    spec: EnvelopeReadSpec<'_>,
+) -> bool {
+    let Some(payload) = Envelope::payload_suffix(bytes) else {
+        return false;
+    };
+    if (payload.len() as u64) <= spec.max_plaintext_bytes.get() {
+        return false;
+    }
+    key.digest(payload) == *digest
 }
 
 fn reject_log_namespace(name: &str) -> Result<()> {
@@ -635,6 +658,7 @@ mod limited_reads {
     use comb_core::error::CoreError;
     use comb_core::operation::OpIdentity;
     use comb_core::{DigestKey, EnvelopeReadSpec, ObjectKind};
+    use comb_object::failpoint::{CountingBackend, FailpointBackend};
     use comb_object::memory::MemoryBackend;
     use comb_object::ObjectBackend;
     use std::num::NonZeroU64;
@@ -770,6 +794,132 @@ mod limited_reads {
         let (got, source) = store.get_blob_limited(&digest, spec).await.unwrap();
         assert_eq!(got, payload);
         assert_eq!(source, GetSource::Cache);
+    }
+
+    #[tokio::test]
+    async fn cache_unsupported_format_is_quarantined_and_refetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, Some(cache.clone()));
+        let payload = b"cached-ok".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let spec = blob_spec(4096, 4096);
+        let _ = store.get_blob_limited(&digest, spec).await.unwrap();
+        let path = cache.join(digest.hex());
+        let mut poisoned = std::fs::read(&path).unwrap();
+        poisoned[6] = 1;
+        poisoned[7] = 0;
+        std::fs::write(&path, poisoned).unwrap();
+
+        let (got, source) = store.get_blob_limited(&digest, spec).await.unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+        assert!(path.with_extension("quarantine").exists());
+    }
+
+    #[tokio::test]
+    async fn cache_wrong_tenant_is_quarantined_and_refetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, Some(cache.clone()));
+        let payload = b"tenant-ok".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let spec = blob_spec(4096, 4096);
+        let _ = store.get_blob_limited(&digest, spec).await.unwrap();
+        let path = cache.join(digest.hex());
+        let bytes = std::fs::read(&path).unwrap();
+        let env = Envelope::decode(&bytes, &store.key).unwrap();
+        let mut meta = serde_json::to_value(&env.meta).unwrap();
+        meta["tenant"] = serde_json::json!("other");
+        let meta_bytes = serde_json::to_vec(&meta).unwrap();
+        let mut poisoned = Vec::new();
+        poisoned.extend_from_slice(b"COMB");
+        poisoned.extend_from_slice(&1u16.to_le_bytes());
+        poisoned.extend_from_slice(&0u16.to_le_bytes());
+        poisoned.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+        poisoned.extend_from_slice(&meta_bytes);
+        poisoned.extend_from_slice(&env.payload);
+        std::fs::write(&path, poisoned).unwrap();
+
+        let (got, source) = store.get_blob_limited(&digest, spec).await.unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+        assert!(path.with_extension("quarantine").exists());
+    }
+
+    #[tokio::test]
+    async fn digest_matched_plaintext_cap_is_terminal_without_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let counting = Arc::new(CountingBackend::new(Arc::new(MemoryBackend::new())));
+        let store = store_with_cache(counting.clone(), Some(cache.clone()));
+        let payload = vec![0xff; 64];
+        let (digest, _) = store.put_blob(payload).await.unwrap();
+        store
+            .get_blob_limited(&digest, blob_spec(4096, 4096))
+            .await
+            .unwrap();
+        let gets_after_fill = counting.get_count();
+        let path = cache.join(digest.hex());
+        assert!(path.exists());
+
+        let err = core(
+            store
+                .get_blob_limited(&digest, blob_spec(4096, 63))
+                .await
+                .unwrap_err(),
+        );
+        match err {
+            CoreError::ObjectTooLarge {
+                limit: 63,
+                actual: Some(64),
+                ..
+            } => {}
+            other => panic!("expected plaintext ObjectTooLarge, got {other:?}"),
+        }
+        assert_eq!(counting.get_count(), gets_after_fill);
+        assert!(path.exists());
+        assert!(!path.with_extension("quarantine").exists());
+    }
+
+    #[tokio::test]
+    async fn get_blob_limited_does_not_fall_back_to_unbounded_get() {
+        let mem = Arc::new(MemoryBackend::new());
+        let counting = Arc::new(CountingBackend::new(mem));
+        let fp = Arc::new(FailpointBackend::drop_next_get_limited_request(
+            counting.clone(),
+            "/objects/",
+        ));
+        let store = store_with_cache(fp, None);
+        let payload = b"no-fallback".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        assert_eq!(counting.get_count(), 0);
+
+        let err = core(
+            store
+                .get_blob_limited(&digest, blob_spec(4096, 4096))
+                .await
+                .unwrap_err(),
+        );
+        assert!(
+            matches!(err, CoreError::BackendUnavailable(_)),
+            "GetLimited-only failure must surface, got {err:?}"
+        );
+        assert_eq!(
+            counting.get_count(),
+            0,
+            "get_blob_limited must not fall back to unbounded get"
+        );
+
+        let (got, source) = store.get_blob(&digest).await.unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+        assert_eq!(counting.get_count(), 1);
     }
 
     #[test]
