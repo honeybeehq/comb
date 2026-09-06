@@ -49,3 +49,15 @@ The isolated daemon rebuilt successfully from `cd1cb26`. Its immutable copy pass
 The diff adds same-origin timer deduplication and disk assertions. It leaves `process_event`, stream delivery and limit accounting unchanged, so it does not address the remaining two-listener retry failure. This disposition is based on the diff; the executable failure was measured at `cd1cb26`. The consolidated owner task now names that single remaining blocker and marks the startup and original timer issues resolved.
 
 The new test helper `persisted_timer_origin_ids` treats any read error or malformed JSON as an empty list. Make unexpected I/O and decode errors fail the test; otherwise assertions of an empty durable timer list can pass on unreadable or corrupt evidence.
+
+## Disposition at 9bb108a
+
+The three previous parent regressions pass. `process_event` now writes timers for its immediate listener list before delivery, limits or shaping. The timer-file assertion helper rejects malformed JSON and unexpected I/O.
+
+A held listener still changes state before those writes. `hold_listen_catchup` pushes an event into `held_live` while constructing the list to process. A sibling timer write then fails. On retry, the same event is pushed again. The new `review_timer_retry_does_not_duplicate_held_live` test reproduces two deliveries of one origin when catch-up releases the queue, consuming a limit of 2. Three earlier tests passed and this one failed in 0.48 seconds. See `verification/pher-timer-9bb108a.json`, its captured output and `pher-held-retry-regression.rs`.
+
+Make held admission part of the retry-safe boundary. Deduplicating only an existing queue is insufficient if catch-up releases the first copy between the failed attempt and retry. Verify that handoff interleaving too.
+
+A separate source observation: the pending tier 3/4 loop still calls fallible `arm_expect_timer` after immediate listener delivery. The claim that every matching timer write precedes delivery is therefore too broad. This path was not exercised by the held-listener test.
+
+No new daemon smoke was run at this commit because the retry boundary still fails. The last measured daemon smoke remains `cd1cb26`; startup verification remains `de71087`.
