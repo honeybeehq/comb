@@ -575,6 +575,7 @@ impl RefMutationPlan for SetTargetPlan {
             },
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }
@@ -646,6 +647,7 @@ impl RefMutationPlan for ClaimPlan {
             },
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }
@@ -708,6 +710,7 @@ impl RefMutationPlan for ReleasePlan {
             },
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: None,
         })
     }
 }

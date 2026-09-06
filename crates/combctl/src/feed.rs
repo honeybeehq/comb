@@ -4,7 +4,8 @@ use super::{AppendRange, Frame, RetentionMode, StableAppendReceipt, CHUNK_SCHEMA
 use crate::catalog::{self, CatalogChunkRef, CatalogState};
 use crate::hamt::{self, IndexHead, Lookup, StableIndexEntry, StableIndexRoot};
 use crate::publish::{
-    CasResult, CommitView, HeadSnapshot, PrepareCtx, PreparedMutation, RefMutationPlan, Upload,
+    CasResult, CommitView, HeadSnapshot, LiveLeaseGuard, PrepareCtx, PreparedMutation,
+    RefMutationPlan, Upload,
 };
 use crate::store::{KeyLayout, Store};
 use anyhow::Result;
@@ -517,6 +518,7 @@ impl CompleteFeed {
             _watch: rx,
             acquire: TokioMutex::new(()),
             renew: StdMutex::new(None),
+            loss: CancellationToken::new(),
         })
     }
 
@@ -1048,6 +1050,7 @@ pub struct WriterSession {
     _watch: watch::Receiver<WriterState>,
     acquire: TokioMutex<()>,
     renew: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    loss: CancellationToken,
 }
 
 impl WriterSession {
@@ -1169,6 +1172,7 @@ impl WriterSession {
     }
 
     fn lose(&self, cause: SessionLoss) {
+        self.loss.cancel();
         self.abort_renew();
         let st = self.state.borrow().clone();
         let epoch = match st {
@@ -1207,6 +1211,7 @@ impl WriterSession {
         let instance = self.instance.canonical();
         let policy = self.policy;
         let state = self.state.clone();
+        let loss = self.loss.clone();
         *slot = Some(tokio::spawn(async move {
             let ttl = policy.ttl.as_secs().max(1) as i64;
             let slack = chrono::Duration::from_std(policy.clock_slack)
@@ -1226,6 +1231,7 @@ impl WriterSession {
                     return;
                 }
                 if lease_until <= now + slack {
+                    loss.cancel();
                     let _ = state.send(WriterState::Lost {
                         epoch: Some(epoch),
                         cause: SessionLoss::LeaseExpired,
@@ -1235,6 +1241,7 @@ impl WriterSession {
                 let remaining = match (lease_until - slack - now).to_std() {
                     Ok(d) if !d.is_zero() => d,
                     _ => {
+                        loss.cancel();
                         let _ = state.send(WriterState::Lost {
                             epoch: Some(epoch),
                             cause: SessionLoss::LeaseExpired,
@@ -1247,6 +1254,7 @@ impl WriterSession {
                 let result = tokio::select! {
                     biased;
                     _ = tokio::time::sleep(remaining) => {
+                        loss.cancel();
                         let _ = state.send(WriterState::Lost {
                             epoch: Some(epoch),
                             cause: SessionLoss::LeaseExpired,
@@ -1258,6 +1266,7 @@ impl WriterSession {
                 match result {
                     Ok(value) => {
                         let Some(lease) = value.lease.as_ref() else {
+                            loss.cancel();
                             let _ = state.send(WriterState::Lost {
                                 epoch: Some(epoch),
                                 cause: SessionLoss::RenewalUncertain,
@@ -1265,6 +1274,7 @@ impl WriterSession {
                             return;
                         };
                         if lease.writer != instance || value.epoch != epoch {
+                            loss.cancel();
                             let _ = state.send(WriterState::Lost {
                                 epoch: Some(epoch),
                                 cause: SessionLoss::OwnerChanged,
@@ -1285,6 +1295,7 @@ impl WriterSession {
                             Some(CoreError::LeaseHeld { .. }) => SessionLoss::OwnerChanged,
                             _ => SessionLoss::RenewalUncertain,
                         };
+                        loss.cancel();
                         let _ = state.send(WriterState::Lost {
                             epoch: Some(epoch),
                             cause,
@@ -1415,6 +1426,7 @@ impl WriterSession {
                         key: key.clone(),
                         payload: payload.to_vec(),
                         payload_hash: payload_hash.clone(),
+                        loss: self.loss.clone(),
                     },
                     snapshot,
                 ),
@@ -1455,6 +1467,7 @@ impl WriterSession {
     }
 
     pub async fn close(self, call: &CallContext) -> Result<(), LeaseError> {
+        self.loss.cancel();
         self.stop_renew().await;
         let st = self.state.borrow().clone();
         let epoch = match st {
@@ -1543,6 +1556,7 @@ struct CompleteAppendPlan {
     key: StableKey,
     payload: Vec<u8>,
     payload_hash: Digest,
+    loss: CancellationToken,
 }
 
 impl RefMutationPlan for CompleteAppendPlan {
@@ -1745,6 +1759,11 @@ impl RefMutationPlan for CompleteAppendPlan {
             },
             admitted: Vec::new(),
             companions: Vec::new(),
+            live_lease: Some(LiveLeaseGuard {
+                writer: self.instance.clone(),
+                epoch: self.epoch,
+                cancel: self.loss.clone(),
+            }),
         })
     }
 }

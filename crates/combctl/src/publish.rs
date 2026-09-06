@@ -20,6 +20,7 @@ use comb_object::Version;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::num::NonZeroU64;
+use tokio_util::sync::CancellationToken;
 
 pub const NS_V2: &str = "comb/v2";
 pub const NS_V3: &str = "comb/v3";
@@ -76,6 +77,42 @@ pub(crate) struct PreparedMutation<R> {
     /// Other identities in this CAS. Their intents are moved to the same
     /// base before the ref write so a crash cannot re-append them.
     pub companions: Vec<Companion>,
+    /// When set, the shared engine rechecks this live lease immediately
+    /// before CAS without rewriting persisted ref_state timestamps.
+    pub live_lease: Option<LiveLeaseGuard>,
+}
+
+pub(crate) struct LiveLeaseGuard {
+    pub writer: String,
+    pub epoch: u64,
+    pub cancel: CancellationToken,
+}
+
+fn enforce_live_lease(
+    guard: &Option<LiveLeaseGuard>,
+    next: &RefValue,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let Some(g) = guard else {
+        return Ok(());
+    };
+    if g.cancel.is_cancelled() {
+        return Err(CoreError::LeaseExpired.into());
+    }
+    let Some(lease) = next.lease.as_ref() else {
+        return Err(CoreError::LeaseExpired.into());
+    };
+    if lease.writer != g.writer || next.epoch != g.epoch {
+        return Err(CoreError::LeaseHeld {
+            holder: lease.writer.clone(),
+            until: lease.lease_until.to_rfc3339(),
+        }
+        .into());
+    }
+    if lease.lease_until <= now {
+        return Err(CoreError::LeaseExpired.into());
+    }
+    Ok(())
 }
 
 pub(crate) struct PrepareCtx<'a> {
@@ -854,15 +891,7 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        let cas_now = self.clock().now();
-        if let Some(lease) = next.lease.as_ref() {
-            if lease.lease_until <= cas_now {
-                return Err(CoreError::LeaseExpired.into());
-            }
-            next.updated_at = cas_now;
-        } else {
-            next.updated_at = now;
-        }
+        enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self
@@ -1073,15 +1102,7 @@ impl Store {
         if prepared.commit_upload.is_some() {
             next.target = Some(commit_digest.clone());
         }
-        let cas_now = self.clock().now();
-        if let Some(lease) = next.lease.as_ref() {
-            if lease.lease_until <= cas_now {
-                return Err(CoreError::LeaseExpired.into());
-            }
-            next.updated_at = cas_now;
-        } else {
-            next.updated_at = now;
-        }
+        enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
         match self

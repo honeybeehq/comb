@@ -639,6 +639,7 @@ async fn review_old_target_cannot_hide_committed_key() {
 }
 
 struct PausedRefRead {
+    fail_read: std::sync::atomic::AtomicBool,
     pause_write: std::sync::atomic::AtomicBool,
     inner: MemoryBackend,
     pause: std::sync::atomic::AtomicBool,
@@ -651,6 +652,7 @@ impl PausedRefRead {
     fn new() -> Self {
         Self {
             inner: MemoryBackend::new(),
+            fail_read: false.into(),
             pause_write: false.into(),
             pause: false.into(),
             entered: false.into(),
@@ -693,6 +695,11 @@ impl ObjectBackend for PausedRefRead {
         k: &str,
         n: std::num::NonZeroU64,
     ) -> comb_core::error::Result<(Vec<u8>, comb_object::Version)> {
+        if k.contains("/refs/") && self.fail_read.swap(false, Ordering::SeqCst) {
+            return Err(comb_core::CoreError::BackendUnavailable(
+                "paused-backend read failure".into(),
+            ));
+        }
         if k.contains("/refs/") && self.pause.swap(false, Ordering::SeqCst) {
             self.entered.store(true, Ordering::SeqCst);
             self.resume.notified().await;
@@ -855,5 +862,108 @@ async fn review_append_cannot_publish_after_lease_expires_during_upload() {
     assert!(
         got.is_err(),
         "new append published after lease expired during upload: {got:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_real_clock_claim_retry_returns_exact_original_ref() {
+    let store = Store::new(
+        Arc::new(MemoryBackend::new()),
+        "review",
+        DigestKey::from_bytes([9; 32]),
+        None,
+    );
+    let op = store.mint_operation();
+    let first = store.claim(op, "plain", "writer", 60, false).await.unwrap();
+    let second = store.claim(op, "plain", "writer", 60, false).await.unwrap();
+    assert_eq!(
+        second.value, first.value,
+        "claim retry changed original RefValue"
+    );
+}
+
+#[tokio::test]
+async fn review_v2_set_target_after_expired_lease_still_works() {
+    let clock = Arc::new(JumpClock(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    )));
+    let store = Store::new(
+        Arc::new(MemoryBackend::new()),
+        "review",
+        DigestKey::from_bytes([9; 32]),
+        None,
+    )
+    .with_clock(clock.clone());
+    store
+        .claim(store.mint_operation(), "plain", "writer", 2, false)
+        .await
+        .unwrap();
+    clock.0.fetch_add(3, Ordering::SeqCst);
+    let (digest, _) = store.put_blob(b"target".to_vec()).await.unwrap();
+    let got = store
+        .set_target_op(store.mint_operation(), "plain", digest, None)
+        .await;
+    assert!(
+        got.is_ok(),
+        "legacy unfenced set-target after lease expiry was rejected: {got:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_lost_session_cannot_finish_suspended_append() {
+    let backend = Arc::new(PausedRefRead::new());
+    let store = Arc::new(Store::new(
+        backend.clone(),
+        "review",
+        DigestKey::from_bytes([9; 32]),
+        None,
+    ));
+    let feed = CompleteFeed::open(store, "paused".into(), &call())
+        .await
+        .unwrap();
+    let policy = LeasePolicy {
+        ttl: Duration::from_secs(3),
+        renew_every: Duration::from_millis(100),
+        clock_slack: Duration::ZERO,
+        initial_acquire_budget: Duration::from_secs(3),
+    };
+    let writer = Arc::new(
+        feed.writer_session(WriterLabel::try_from("paused").unwrap(), policy)
+            .unwrap(),
+    );
+    writer.ready(&call()).await.unwrap();
+    backend.pause_write.store(true, Ordering::SeqCst);
+    let pending = {
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            writer
+                .append_stable(
+                    StableKey::try_from_canonical(b"one".to_vec()).unwrap(),
+                    Bytes::from_static(b"payload"),
+                    &call(),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !backend.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    backend.fail_read.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !matches!(writer.state(), WriterState::Lost { .. }) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    backend.resume.notify_one();
+    let got = pending.await.unwrap();
+    assert!(
+        got.is_err(),
+        "Lost session issued a new publication after resuming upload: {got:?}"
     );
 }
