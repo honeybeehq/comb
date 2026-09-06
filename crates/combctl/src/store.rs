@@ -20,6 +20,23 @@ pub struct Store {
     pub cache_dir: Option<PathBuf>,
     clock: Arc<dyn Clock>,
     policy: OperationPolicy,
+    pub(crate) layout: KeyLayout,
+}
+
+/// Physical object/ref/intent prefix. R1 constructors stay on v2.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeyLayout {
+    V2,
+    V3,
+}
+
+impl KeyLayout {
+    pub(crate) fn prefix(self) -> &'static str {
+        match self {
+            Self::V2 => crate::publish::NS_V2,
+            Self::V3 => crate::publish::NS_V3,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,11 +68,16 @@ impl Store {
             cache_dir,
             clock: Arc::new(SystemClock),
             policy: OperationPolicy::default(),
+            layout: KeyLayout::V2,
         }
     }
 
     pub fn with_clock(self, clock: Arc<dyn Clock>) -> Self {
         Self { clock, ..self }
+    }
+
+    pub(crate) fn with_layout(self, layout: KeyLayout) -> Self {
+        Self { layout, ..self }
     }
 
     pub fn with_policy(self, policy: OperationPolicy) -> Self {
@@ -97,6 +119,36 @@ impl Store {
         };
         self.cache_write(&digest, &bytes);
         Ok((digest, dedup))
+    }
+
+    pub(crate) async fn put_object(
+        &self,
+        kind: ObjectKind,
+        schema: &str,
+        payload: Vec<u8>,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<Digest> {
+        let env = Envelope::new(&self.tenant, kind, schema, payload, &self.key);
+        let digest = env.meta.digest.clone();
+        let bytes = env.encode()?;
+        if bytes.len() as u64 > max_encoded_bytes.get() {
+            return Err(CoreError::ObjectTooLarge {
+                key: self.object_key(&digest),
+                limit: max_encoded_bytes.get(),
+                actual: Some(bytes.len() as u64),
+            }
+            .into());
+        }
+        match self
+            .backend
+            .put_create(&self.object_key(&digest), &bytes)
+            .await
+        {
+            Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.cache_write(&digest, &bytes);
+        Ok(digest)
     }
 
     pub async fn get_blob(&self, digest: &Digest) -> Result<(Vec<u8>, GetSource)> {
@@ -169,7 +221,11 @@ impl Store {
     }
 
     fn cache_path(&self, digest: &Digest) -> Option<PathBuf> {
-        self.cache_dir.as_ref().map(|d| d.join(digest.hex()))
+        let dir = self.cache_dir.as_ref()?;
+        Some(match self.layout {
+            KeyLayout::V2 => dir.join(digest.hex()),
+            KeyLayout::V3 => dir.join("comb-v3").join(digest.hex()),
+        })
     }
 
     fn cache_read(&self, digest: &Digest) -> Option<Vec<u8>> {
@@ -363,7 +419,10 @@ async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Resu
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
         return Ok(());
     };
-    if value.get("schema").and_then(|s| s.as_str()) == Some("comb.log.partition-manifest/v2") {
+    let schema = value.get("schema").and_then(|s| s.as_str());
+    if schema == Some("comb.log.partition-manifest/v2")
+        || schema == Some("comb.log.partition-manifest/v3")
+    {
         return Err(
             CoreError::Rejected("core set-target cannot overwrite a log-owned ref".into()).into(),
         );
@@ -560,6 +619,7 @@ impl RefMutationPlan for ReleasePlan {
 mod limited_reads {
     use super::*;
     use comb_core::error::CoreError;
+    use comb_core::operation::OpIdentity;
     use comb_core::{DigestKey, EnvelopeReadSpec, ObjectKind};
     use comb_object::memory::MemoryBackend;
     use comb_object::ObjectBackend;
@@ -696,5 +756,24 @@ mod limited_reads {
         let (got, source) = store.get_blob_limited(&digest, spec).await.unwrap();
         assert_eq!(got, payload);
         assert_eq!(source, GetSource::Cache);
+    }
+
+    #[test]
+    fn v2_and_v3_layouts_use_distinct_keys_and_cache_paths() {
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let dir = tempfile::tempdir().unwrap();
+        let v2 = store_with_cache(mem.clone(), Some(dir.path().to_path_buf()));
+        let v3 = v2.clone().with_layout(KeyLayout::V3);
+        let digest = DigestKey::from_bytes([1u8; 32]).digest(b"x");
+        assert_ne!(v2.object_key(&digest), v3.object_key(&digest));
+        assert!(v2.object_key(&digest).starts_with("comb/v2/"));
+        assert!(v3.object_key(&digest).starts_with("comb/v3/"));
+        assert_ne!(v2.ref_key("log/a/p0"), v3.ref_key("log/a/p0"));
+        let op = v2.mint_operation();
+        assert_ne!(
+            v2.intent_key(&OpIdentity::Generic(op.clone())),
+            v3.intent_key(&OpIdentity::Generic(op))
+        );
+        assert_ne!(v2.cache_path(&digest), v3.cache_path(&digest));
     }
 }

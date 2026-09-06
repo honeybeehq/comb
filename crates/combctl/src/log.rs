@@ -1478,6 +1478,10 @@ async fn commit_group(
     }
 }
 
+#[path = "feed.rs"]
+mod feed;
+pub use feed::*;
+
 mod hex_payload {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {

@@ -18,8 +18,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 pub const NS_V2: &str = "comb/v2";
+pub const NS_V3: &str = "comb/v3";
 pub const NS_V1: &str = "comb/v1";
 const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
+const LOG_MANIFEST_SCHEMA_V3: &str = "comb.log.partition-manifest/v3";
 const MAX_PUBLISH_ATTEMPTS: u32 = 128;
 const MAX_SEEK_HOPS: u32 = 10_000;
 
@@ -118,7 +120,8 @@ pub(crate) struct CommitView {
 impl Store {
     pub fn object_key(&self, digest: &Digest) -> String {
         format!(
-            "{NS_V2}/tenants/{}/objects/b3k/{}/{}",
+            "{}/tenants/{}/objects/b3k/{}/{}",
+            self.layout.prefix(),
             self.tenant,
             digest.key_prefix(),
             digest.hex()
@@ -126,7 +129,11 @@ impl Store {
     }
 
     pub fn ref_key(&self, name: &str) -> String {
-        format!("{NS_V2}/tenants/{}/refs/{name}.json", self.tenant)
+        format!(
+            "{}/tenants/{}/refs/{name}.json",
+            self.layout.prefix(),
+            self.tenant
+        )
     }
 
     pub fn v1_ref_key(&self, name: &str) -> String {
@@ -136,14 +143,18 @@ impl Store {
     pub fn intent_key(&self, identity: &OpIdentity) -> String {
         match identity {
             OpIdentity::Generic(_) => format!(
-                "{NS_V2}/tenants/{}/ops/{}/{}.json",
+                "{}/tenants/{}/ops/{}/{}.json",
+                self.layout.prefix(),
                 self.tenant,
                 identity.shard(),
                 identity.canonical()
             ),
-            OpIdentity::Stable(k) => {
-                format!("{NS_V2}/tenants/{}/stable/{}.json", self.tenant, k.to_hex())
-            }
+            OpIdentity::Stable(k) => format!(
+                "{}/tenants/{}/stable/{}.json",
+                self.layout.prefix(),
+                self.tenant,
+                k.to_hex()
+            ),
         }
     }
 
@@ -1154,7 +1165,7 @@ impl Store {
                 target_follows_commit: false,
             });
         }
-        if schema != LOG_MANIFEST_SCHEMA {
+        if schema != LOG_MANIFEST_SCHEMA && schema != LOG_MANIFEST_SCHEMA_V3 {
             return Err(CoreError::RecoveryFailed(format!(
                 "object {digest} has unknown commit schema {schema}"
             ))
