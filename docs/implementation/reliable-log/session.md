@@ -1,48 +1,42 @@
 # Execution state
 
-This document records orchestration facts for session continuation. It is not an acceptance report.
+As of 2026-09-06 07:55 UTC. This is a coordination reference, not an acceptance report.
 
-- Parent Apiary session: `09572752-9d27-4fe5-a222-2f34ea27d7a8`.
-- Comb implementation worktree: `/Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log`, branch `feat/reliable-log`, base `b77b64e`.
-- Pheromone integration worktree: `/Users/trmd/Projects/honeybee/pheromone/repos/pher-comb-log`, branch `feat/comb-log`, base `9291518`.
-- Design A: Claude fable/max, bee `ba27fa95-1ace-43cb-a82e-fea26a6a5eef`, detached checkout `comb-design-a`, expected artifact `/tmp/comb-design-a.md`.
-- Design B: Codex gpt-5.6-sol/max, bee `82708653-24ed-48bd-82d8-2e6a1927f90c`, detached checkout `comb-design-b`, expected artifact `/tmp/comb-design-b.md`.
-- Consumer map: Grok grok-4.6/xhigh, bee `135f7971-4592-4f8d-815a-4829bd1cf469`, expected artifact `/tmp/comb-pher-integration-map.md`.
-- Design A and B completed; independent judge Claude opus/max selected A with grafts from B. Pheromone worker is implementing the local TrailLog slice, owns its branch production files, and must not spawn children. Spawn all children through authenticated Apiary agent_spawn.
-- Comb baseline compiled in `/Users/trmd/Projects/honeybee/comb/repos/comb/target`. Set `CARGO_TARGET_DIR` to that path for sequential Comb checks to reuse native dependencies.
-- Pheromone baseline test started with `CARGO_TARGET_DIR=/Users/trmd/Projects/honeybee/pheromone/repos/pheromone/target cargo test -p pher --no-fail-fast`.
-- AWS test bucket `comb-dev-th`, profile `th`, region `eu-north-1` is reachable. MinIO bucket `comb-dev`, profile `minio`, endpoint `http://trmd-metal-1:9000` is reachable. Both passed all nine baseline conformance checks.
-- Backend baseline configurations are isolated under `/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-backend-baseline-rhm9bgn4`. Each has a unique verification prefix. Do not print credential or tenant-key contents.
-- MinIO is an existing systemd user service, not Docker. Do not modify or restart it for failure tests. Inject client faults or use a separate local test instance.
-- Root owns docs/implementation and backend verification. The shared Core/Log implementation follows synthesis.md and cross-judge.md.
-- Foundation agent 2efd79a9-ded6-40a3-9251-30a291369cb0 owns feat/foundation-bridge at comb-foundation-bridge, based on b77b64e. Exclusive paths: crates/combctl/src/bin/comb-bridge.rs, crates/combctl/src/bridge/, crates/combctl/tests/bridge_*.rs, docs/testing/foundation-bridge.md and acceptance fixtures/scripts. Coordinate any shared Cargo/lib.rs edit. First gate stdio-only, stable keys retained for complete-feed lifetime.
+## Active ownership
 
-- Core/Log R1 owner: b9ca1d3d-1a6f-4186-94eb-b71d34537dda, Grok grok-4.6/xhigh, exclusive production writer in comb-reliable-log. Generic timed operations use immutable-history recovery; stable keys use the manifest-rooted HAMT.
-- Foundation bridge worker: 5711135c-4831-4bf7-8947-64bf35bba4ab. The default-run compatibility line is integrated as436658c.
+- Root Apiary session `09572752-9d27-4fe5-a222-2f34ea27d7a8` owns coordination, `docs/implementation/reliable-log`, CI, root review records and live backend acceptance.
+- Current integration checkout is `/Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r1`, branch `feat/reliable-log-r1`, based on `c948306`.
+- Sole R1 production owner is `30db6b86-e87b-4213-9797-87909e1a3c29`, Grok grok-4.6/xhigh. Current instructions are `/tmp/comb-r1-replacement-task.md`. Review notes are `/tmp/comb-r1-review-notes.md` and [the concurrency review](r1-concurrency-review.md).
+- Old worker `b9ca1d3d-1a6f-4186-94eb-b71d34537dda` is retired. Its checkout `comb-reliable-log` preserves old WIP. It has no write ownership. Later messages and signatures from that worker are obsolete.
+- Foundation lead `2efd79a9-ded6-40a3-9251-30a291369cb0` owns `feat/foundation-bridge` in `comb-foundation-bridge`. Its paths are `crates/combctl/src/bin/comb-bridge.rs`, `src/bridge`, `tests/bridge_*`, bridge fixtures, scripts and review/testing docs. Worker `5711135c-4831-4bf7-8947-64bf35bba4ab` owns transport implementation there. Shared storage coordination stays through root.
+- Pheromone worker `135f7971-4592-4f8d-815a-4829bd1cf469` owns `feat/comb-log` in `/Users/trmd/Projects/honeybee/pheromone/repos/pher-comb-log`. Current instructions are `/tmp/comb-pher-current-task.md`.
+- Design A bee `ba27fa95-1ace-43cb-a82e-fea26a6a5eef`, R2 designer `82708653-24ed-48bd-82d8-2e6a1927f90c` and independent reviewer `25c989a5-a1ca-44e0-b6ad-692eae99826b` have completed their current assignments.
 
-- Root commits on feat/reliable-log: b7966bc design/baselines, 436658c default binary compatibility, dbe683a CI, c2a3914 Foundation fixtures. Feature branch pushed through dbe683a; CI run34016077878 passed tests and clippy. Later commits need pushing after verification.
-- Stable path FINAL correction: no Pending/permanent intent, opaque bounded key bytes, one key per change, HAMT rooted in same Log manifest CAS, durable Complete retention mode. See stable-key-addendum.md. R1 early sk1 string signature is obsolete. Urgency-now messages2383 and follow-up deliver this before further stable code; await corrected API.
-- Pheromone interim review findings delivered with urgency now2385: timestamp filter, bounded replay queues, SQL trim boundary, atomic seed, read snapshots, corrupt JSON errors, checked i64 allocation, durable SQLite sync. Worker retains ownership.
-- Live conditional-delete probe: S3 passes; MinIO ignores mismatched If-Match and deletes. Results in conditional-delete-backends.json. GC design review running on Claude judge25c989a5, expected /tmp/comb-gc-review.md. Complete-feed integration does not wait for GC.
-- Foundation fixture verifier independently passes with3 changes,2 annotations and expected hash. Actual bridge transport acceptance remains pending.
+## Verification and remaining gates
 
-## Continuation update
+- Foundation transport is integrated through `1619f08`. Source picks `209199a`, `290c609`, `ec4fbd9`, `22c14d6`, `df98595` became `35bdd5c`, `e3d4019`, `cbd99c1`, `e93f37c`, `1619f08`.
+- [CI run 34020281297](https://github.com/honeybeehq/comb/actions/runs/34020281297) passed workspace tests, clippy, eight Node client/key tests and script syntax at `1619f08`. This commit excludes uncommitted R1 production changes. Foundation also reports 21 protocol, five transport, three real-process and one binary test passing in its private target.
+- Bridge append, read and follow still return Unsupported. Both storage capabilities remain false. No successful storage capture or Foundation readiness claim exists.
+- R1 is uncommitted. The worker reports core and object crates typecheck and is checking combctl and tests. Publication proof, exact original retry results, group admission races and HAMT validation remain subject to final review.
+- [R2 contract](r2-contract.md) is finalized. Implementation follows verified R1. It requires bounded backend reads, catalog manifests, bounded replay and renewable instance-owned writer sessions. R1 unbounded reads do not satisfy the bridge gate.
+- Stable append uses one opaque key of 1 through 512 bytes and one payload. No stable Pending intent exists in the accepted design. A persistent HAMT is published with the event in the same manifest CAS. [The stable-key addendum](stable-key-addendum.md) overrides early batch and ASCII-key sketches.
+- Three real Foundation .fdnc changes from two offline peers independently replay to two comments. Expected projection SHA256 is `b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a`. This verifies the fixture, not bridge storage.
+- Final backend acceptance must use an immutable copied bridge binary, forward and reverse submission, restart with a fresh cache, exact captured bytes and fresh Loro replay. Prepared isolated configurations are in `/tmp/comb-foundation-gate-cj4oungg`. No successful run has occurred there.
+- `verification/bridge-load.mjs` is syntax-checked and refuses the unsupported provisional bridge without a receipt. Throughput, latency and sampled RSS measurements await actual storage support.
+- Pheromone is committed through `7260fe7`, with 60 worker tests reported passing. Root independently passed 55 tests at `618de39` and the isolated daemon smoke at `01dbe34`. Those results do not approve later changes.
+- Current Pheromone fixes address held-live expect timer ordering and concurrent SQLite first-open failure. Root reproduced SQLite code 5 on the first isolated attempt. Evidence is committed in `verification/pher-firstopen-failure.txt` and `.json`. Repeated startup verification and a rebuilt daemon smoke remain pending.
+- ObjectLog integration, deterministic delivery identity and the broader retention work remain unfinished.
 
-- Integrated Foundation fixture/key/acceptance/client work through4b55c99. CI follow-up e6b1d2b is pushed. GitHub run34017850514 passed Rust tests, clippy and eight Node client/key tests. This excludes the still-uncommitted R1 code.
-- Current R1 instruction file is /tmp/comb-r1-current-task.md; review observations are /tmp/comb-r1-review-notes.md. The stable-key addendum overrides every early ASCII-key or permanent-intent sketch.
-- R2 design reviewer82708653 prepared /tmp/comb-r2-contract.md. Bounded object fetch, catalog and instance-owned writer sessions are the immediate next implementation slice. Contract review is still in progress.
-- Pheromone branch now includes01dbe34 after3fb9782 and51fcfbb, with50 worker tests passing. Root found further silent catch-up error handling and disconnect cleanup issues; /tmp/comb-pher-current-task.md records them. Independent daemon smoke is pending the current build.
-- Grok message delivery can remain queued while the runtime is busy. Do not assume sent means read. Consolidated task files preserve current decisions. Stopping only an owned child runtime previously caused Hive to revive it and deliver a queued message; no shared services were restarted.
-- GC review and root disposition are committed in gc-review.md and gc-design.md. Physical collection stays disabled, including namespace-only deferred deletion.
+## Build and backend isolation
 
-## R1 worker replacement
+- R1 uses only `/Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r1/target` for Cargo output.
+- Foundation uses only `/Users/trmd/Projects/honeybee/comb/repos/comb-foundation-bridge/target-bridge`.
+- Pheromone uses `/Users/trmd/Projects/honeybee/pheromone/repos/pheromone/target`.
+- The original Comb shared target and the unused `comb/target-r1` clone are not current build targets. Do not interrupt healthy compiles to move artifact locks.
+- AWS profile `th`, bucket `comb-dev-th`, region `eu-north-1` and MinIO profile `minio`, bucket `comb-dev`, endpoint `http://trmd-metal-1:9000` passed nine baseline conformance checks on isolated prefixes. Configuration contents contain private keys and must not be printed.
+- MinIO is an existing systemd user service. No shared daemon, backend or sccache restart is authorized for these drills.
+- Physical collection remains disabled. S3 passed the negative conditional-delete probe. MinIO ignored a wrong If-Match and deleted the probe object. [GC review](gc-review.md) records additional unresolved publication races. Complete-feed Foundation acceptance does not require collection.
 
-The old worker received a stale queued batch-key instruction and started reversing the settled single-payload API. Repeated runtime interrupts did not reliably drain obsolete mail. Root revoked its implementation ownership, preserved WIP in a new checkout, and created a fresh worker with only the consolidated current task.
+## Coordination
 
-- Current integration checkout: /Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r1.
-- Current integration branch: feat/reliable-log-r1, based on c948306.
-- Sole R1 production owner:30db6b86-e87b-4213-9797-87909e1a3c29, Grok grok-4.6/xhigh.
-- Current task: /tmp/comb-r1-replacement-task.md. Root observations: /tmp/comb-r1-review-notes.md.
-- Old b9ca1d3d worker has no write ownership. Do not send it further implementation messages or integrate its later output. Its old checkout is preserved.
-- Claude review r1-concurrency-review.md found group receipt fabrication, unresolved companion rebasing, an Applied-companion duplicate race and incomplete proof validation. These must be fixed before R1 acceptance.
-- R2 contract r2-contract.md is finalized. It includes bounded backend reads, catalog manifests, one-payload stable append and renewable instance-owned sessions. No destructive collection.
+Current task files override stale queued sketches. A sent message is not evidence of delivery. Check the actual source and checked signatures before wiring a consumer. Spawn children through authenticated Apiary agent_spawn. No worker has permission to spawn nested agents or push.
