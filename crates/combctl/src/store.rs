@@ -162,13 +162,12 @@ impl Store {
                 Ok(env) if env.meta.digest == *digest => {
                     return Ok((env.payload, GetSource::Cache));
                 }
-                Ok(_) | Err(CoreError::IntegrityError(_)) | Err(CoreError::InvalidFormat(_)) => {
+                Ok(_) | Err(_) => {
                     self.cache_quarantine(digest);
                     eprintln!(
                         "warning: cache entry for {digest} failed verification — quarantined, refetching from backend"
                     );
                 }
-                Err(e) => return Err(e.into()),
             }
         }
         let (bytes, _) = self.backend.get(&self.object_key(digest)).await?;
@@ -184,7 +183,6 @@ impl Store {
     ///
     /// The disk cache is subject to the same encoded cap as the backend.
     /// Oversized cache entries are quarantined and the backend is retried.
-    #[allow(dead_code)] // no log/publish callers until the retained-target SHA
     pub(crate) async fn get_blob_limited(
         &self,
         digest: &Digest,
@@ -945,6 +943,28 @@ mod limited_reads {
         assert_eq!(got, payload);
         assert_eq!(source, GetSource::Backend);
         assert_eq!(counting.get_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_blob_quarantines_unsupported_cache_format_and_refetches() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let mem: Arc<dyn ObjectBackend> = Arc::new(MemoryBackend::new());
+        let store = store_with_cache(mem, Some(cache.clone()));
+        let payload = b"r1-cached".to_vec();
+        let (digest, _) = store.put_blob(payload.clone()).await.unwrap();
+        let _ = store.get_blob(&digest).await.unwrap();
+        let path = cache.join(digest.hex());
+        let mut poisoned = std::fs::read(&path).unwrap();
+        poisoned[6] = 1;
+        poisoned[7] = 0;
+        std::fs::write(&path, poisoned).unwrap();
+
+        let (got, source) = store.get_blob(&digest).await.unwrap();
+        assert_eq!(got, payload);
+        assert_eq!(source, GetSource::Backend);
+        assert!(path.with_extension("quarantine").exists());
     }
 
     #[test]
