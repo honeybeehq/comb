@@ -1,0 +1,204 @@
+
+running 1 test
+test review_acquisition_mutex_wait_honors_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_append_cannot_publish_after_lease_expires_during_upload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_cancelled_read_is_cancelled ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_existing_v3_survives_later_v1_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_expired_read_is_deadline_exceeded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_foreign_manifest_is_not_replayed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_hung_idle_renewal_loses_by_lease_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 1.41s
+
+
+
+running 1 test
+test review_idle_renewal_cannot_revive_expired_lease ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.35s
+
+
+
+running 1 test
+test review_lost_session_cannot_finish_suspended_append ...
+thread 'review_lost_session_cannot_finish_suspended_append' (58466763) panicked at crates/combctl/tests/r2_parent_review.rs:909:5:
+Lost session issued a new publication after resuming upload: Ok(StableAppendReceipt { payload_hash: b3k:307f3fc061ef49985282304bfa482c21fdfe90a5c135a6d010cc5bdda3e0ab47, range: AppendRange { first: 1, last: 1 }, generation: 2 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_lost_session_cannot_finish_suspended_append
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.11s
+
+
+
+running 1 test
+test review_manifest_head_cannot_hide_catalog_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_max_head_is_integrity_not_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_committed_target_is_not_empty_feed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_after_release_cannot_reset_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_after_release_is_not_empty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_cannot_reset_stable_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_old_target_cannot_hide_committed_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_read_never_uses_unbounded_get ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_real_clock_claim_retry_returns_exact_original_ref ...
+thread 'review_real_clock_claim_retry_returns_exact_original_ref' (58466795) panicked at crates/combctl/tests/r2_parent_review.rs:823:5:
+assertion `left == right` failed: claim retry changed original RefValue
+  left: RefValue { schema: "comb.ref/v2", tenant: "review", name: "plain", generation: 1, epoch: 1, target: None, lease: Some(Lease { writer: "writer", lease_until: 2026-09-06T13:09:06.018470Z }), updated_at: 2026-09-06T13:08:06.018470Z, head_commit: Some(b3k:5b17fa680c09042b0fdda4a09305f4f88d5d17c8031b888cd5e5ebb74917ee88) }
+ right: RefValue { schema: "comb.ref/v2", tenant: "review", name: "plain", generation: 1, epoch: 1, target: None, lease: Some(Lease { writer: "writer", lease_until: 2026-09-06T13:09:06.018470Z }), updated_at: 2026-09-06T13:08:06.018986Z, head_commit: Some(b3k:5b17fa680c09042b0fdda4a09305f4f88d5d17c8031b888cd5e5ebb74917ee88) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_real_clock_claim_retry_returns_exact_original_ref
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_renewal_rechecks_clock_after_delayed_read ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.15s
+
+
+
+running 1 test
+test review_takeover_preserves_read_before_next_append ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.02s
+
+
+
+running 1 test
+test review_transient_catalog_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_transient_manifest_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.04s
+
+
+
+running 1 test
+test review_unacquired_close_completes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_v2_set_target_after_expired_lease_still_works ...
+thread 'review_v2_set_target_after_expired_lease_still_works' (58466817) panicked at crates/combctl/tests/r2_parent_review.rs:850:5:
+legacy unfenced set-target after lease expiry was rejected: Err(rejected: lease expired)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_v2_set_target_after_expired_lease_still_works
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+
+Baseline 5b0d1d7, two compatibility tests:
+
+running 2 tests
+test review_real_clock_claim_retry_returns_exact_original_ref ... ok
+test review_v2_set_target_after_expired_lease_still_works ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
