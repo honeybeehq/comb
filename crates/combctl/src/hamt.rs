@@ -112,6 +112,7 @@ pub async fn lookup(
     head: IndexHead,
 ) -> Result<Lookup> {
     root.validate()?;
+    check_root_against_head(root, head)?;
     let path = key.path_digest(&store.key, &store.tenant, logical_log);
     let mut digest = root.digest.clone();
     let mut depth = 0usize;
@@ -179,6 +180,7 @@ pub async fn insert(
     head: IndexHead,
 ) -> Result<StableIndexRoot> {
     root.validate()?;
+    check_root_against_head(root, head)?;
     validate_leaf_range(
         entry.first,
         entry.last,
@@ -250,7 +252,7 @@ async fn insert_at(
                 generation,
             };
             let old_path = old.key.path_digest(&store.key, &store.tenant, logical_log);
-            split(store, &old, &old_path, entry, path, depth).await
+            split(store, &old, &old_path, entry, path, depth, head).await
         }
         HamtNode::Branch { mut children, .. } => {
             if depth > MAX_DEPTH {
@@ -292,7 +294,10 @@ async fn split(
     b: &StableIndexEntry,
     b_path: &Digest,
     depth: usize,
+    head: IndexHead,
 ) -> Result<Digest> {
+    validate_leaf_range(a.first, a.last, a.generation, &a.payload_hash, head)?;
+    validate_leaf_range(b.first, b.last, b.generation, &b.payload_hash, head)?;
     if depth > MAX_DEPTH {
         return Err(CoreError::Rejected("stable key path hash collision".into()).into());
     }
@@ -309,7 +314,7 @@ async fn split(
     if depth == MAX_DEPTH {
         return Err(CoreError::Rejected("stable key path hash collision".into()).into());
     }
-    let child = Box::pin(split(store, a, a_path, b, b_path, depth + 1)).await?;
+    let child = Box::pin(split(store, a, a_path, b, b_path, depth + 1, head)).await?;
     let mut children = Vec::new();
     upsert_child(&mut children, sa, child);
     put_node(store, &branch_node(depth, a_path, children)?).await
@@ -557,6 +562,19 @@ fn branch_node(
         prefix: path_prefix(path, depth)?,
         children,
     })
+}
+
+pub(crate) fn check_root_against_head(
+    root: &StableIndexRoot,
+    head: IndexHead,
+) -> std::result::Result<(), CoreError> {
+    if root.entries > head.head_seq {
+        return Err(CoreError::IntegrityError(format!(
+            "stable index claims {} entries past head_seq {}",
+            root.entries, head.head_seq
+        )));
+    }
+    Ok(())
 }
 
 fn check_root_shape(
@@ -1074,6 +1092,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_entries_past_head_seq_is_integrity() {
+        let store = store();
+        let mut root = empty_root(&store).await.unwrap();
+        let e = entry(&store, "doc-a", 1, 1, 1);
+        root = insert(&store, &root, e.clone(), "feed", head(1))
+            .await
+            .unwrap();
+        let err = lookup(
+            &store,
+            &StableIndexRoot::new(root.digest.clone(), 8),
+            &e.key,
+            "feed",
+            head(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(m)) if m.contains("head_seq")
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_root_count_disagreement_is_integrity() {
         let store = store();
         let empty = empty_root(&store).await.unwrap();
@@ -1082,7 +1126,10 @@ mod tests {
             &StableIndexRoot::new(empty.digest.clone(), 4),
             &key("x"),
             "feed",
-            head(1),
+            IndexHead {
+                generation: 4,
+                head_seq: 4,
+            },
         )
         .await
         .unwrap_err();
