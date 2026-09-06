@@ -6,7 +6,7 @@ R2 follows the accepted R1 publication engine. It adds the smallest set of capab
 
 R2 does not add physical compaction, destructive GC, partitions, Comb Trees, Volumes, hosted tenancy, or bridge wire fields. Complete feeds remain untrimmed. A separate finite-feed test keeps `Trimmed` behavior honest.
 
-R1 must first provide checked names for `StableKey`, `StableAppendReceipt`, `HeadSnapshot`, `RefMutationPlan`, and the persisted `Complete` mode. The sketches below use those names but do not create aliases around them.
+R1 names and publication hooks are checked against52c1963, with retained-target recovery refined in a675d38. The [checked implementation handoff](r2-checked-handoff.md) maps the remaining sketches to actual APIs and defines the lease encoding and physical namespace. It takes precedence over abbreviated examples below.
 
 ## Caller usage
 
@@ -90,7 +90,7 @@ pub struct LogEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct LogHead {
+pub struct CompleteFeedHead {
     pub generation: u64,
     pub head_seq: u64,
     pub next: Cursor,
@@ -121,7 +121,7 @@ impl FollowWait {
 
 #[async_trait]
 pub trait LogReader: Send + Sync {
-    async fn head(&self, call: &CallContext) -> Result<LogHead, ReadError>;
+    async fn head(&self, call: &CallContext) -> Result<CompleteFeedHead, ReadError>;
 
     async fn read_page(
         &self,
@@ -142,7 +142,7 @@ pub trait LogReader: Send + Sync {
 impl CompleteFeed {
     pub async fn open(
         store: Arc<Store>,
-        log: LogId,
+        logical: String,
         call: &CallContext,
     ) -> Result<Self, OpenLogError>;
 }
@@ -206,14 +206,13 @@ pub enum CompleteManifestSchemaV3 {
     V3,
 }
 
-pub struct ChunkRef {
+pub struct CatalogChunkRef {
     pub digest: Digest,
     pub first_seq: u64,
     pub last_seq: u64,
     pub event_count: u32,
     pub raw_payload_bytes: u64,
     pub plaintext_bytes: u64,
-    pub object_bytes: u64,
 }
 
 pub struct ChunkCatalogRoot {
@@ -233,7 +232,7 @@ pub enum CatalogSchemaV1 {
 
 enum CatalogNode {
     Leaf {
-        refs: BoundedVec<ChunkRef, MAX_CATALOG_ITEMS>,
+        refs: BoundedVec<CatalogChunkRef, MAX_CATALOG_ITEMS>,
     },
     Branch {
         height: u8,
@@ -268,8 +267,12 @@ pub struct CompleteLogManifest {
     /// Required even for an empty feed; there is no missing-field default.
     pub catalog: CatalogState,
     pub stable_index: StableIndexRoot,
-    pub stable_admissions: BoundedStableAdmissions,
-    // R1 commit header and result fields remain unchanged.
+    pub log: String,
+    pub admitted: Vec<Admission>,
+    pub stable_admissions: Vec<StableIndexEntry>,
+    pub result: serde_json::Value,
+    pub ref_state: Option<RefValue>,
+    // Enforce existing admission count and byte caps through hamt::admissions_size.
 }
 ```
 
@@ -344,7 +347,7 @@ pub const MAX_MANIFEST_OBJECT_BYTES: u64 = 512 * 1024;
 pub const MAX_STABLE_INDEX_NODE_OBJECT_BYTES: u64 = 8 * 1024;
 ```
 
-Writers check count, raw bytes, serialized chunk bytes, and encoded envelope bytes before upload. Readers check the same fields against `ChunkRef`.
+Writers check count, raw bytes, serialized chunk bytes, and encoded envelope bytes before upload. Readers compare count and payload lengths against `CatalogChunkRef` and enforce the encoded-object cap with `get_limited`. The catalog does not persist `object_bytes`: envelope encoding occurs after plan preparation.
 
 The chunk limits account for serde JSON's worst case for a byte vector, not an average or ASCII payload. At most four encoded bytes per raw byte, plus `256` bytes of fixed-schema framing per event and 1 KiB of body framing, gives `4 * 512 KiB + 2,048 * 256 + 1 KiB < 3 MiB`. Envelope v1 then adds at most 64 KiB of metadata and 12 header bytes, below the 4 MiB object cap. The current hex adapter is smaller, but the bound does not depend on it. The writer still measures the actual serialization and rejects an over-cap chunk before upload.
 
@@ -378,15 +381,8 @@ pub struct WriterInstanceId([u8; 16]);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterLabel(BoundedString<64>);
 
-pub struct LeaseOwner {
-    pub instance: WriterInstanceId,
-    pub label: WriterLabel,
-}
-
-pub struct Lease {
-    pub owner: LeaseOwner,
-    pub lease_until: DateTime<Utc>,
-}
+// Persist canonical WriterInstanceId text in existing comb_core::Lease.writer.
+// WriterLabel remains process-local; RefValue.epoch completes the owner pair.
 
 pub struct LeasePolicy {
     pub ttl: Duration,
@@ -459,7 +455,7 @@ impl WriterSession {
 }
 ```
 
-The display label never establishes ownership. Each process start and each explicit reacquisition creates a new random `WriterInstanceId`. A live lease belongs only to the pair `(instance, epoch)`. This `Lease` replaces equality on the current `Lease.writer: String`.
+The display label never establishes ownership. Each process start and each explicit reacquisition creates a new random `WriterInstanceId`. A live lease belongs only to the pair `(instance, epoch)`. The existing `Lease.writer: String` stores the canonical instance ID. The ref schema stays `comb.ref/v2`; R2 checks that field together with the epoch.
 
 The session starts in `Unacquired` and performs no storage I/O. `ready`, or an append whose key is absent, moves it to `Acquiring`. A bridge supervisor may call `ready` at process start. It may wait for an unrelated lease to expire within its 45-second lifecycle budget, then acquire through a fresh-head CAS that increments the epoch. It never steals a live unrelated lease. If the caller's deadline ends first, new appends return typed `LeaseHeld` or `DeadlineExceeded`. An administrative live takeover remains a separate CLI operation.
 
@@ -484,7 +480,7 @@ Foundation's stable key and payload hash exclude the session instance, label, ep
 5. Add `WriterSession`, idle renewal, fence loss, and bounded reacquisition. Replace writer-string equality in Log append with instance-and-epoch checks.
 6. Add `follow_page` as bounded pull with hints and polling. Then enable the existing Foundation bridge capabilities without changing its wire contract.
 
-Namespace isolation replaces a migration seal only when the R2 prefix is fresh and legacy binaries cannot address it. Otherwise R2 remains disabled until the tested seal is present. Manifest schema checks are a fail-closed backstop, not permission to mix R1 and R2 writers.
+R2 uses a Store-owned `comb/v3/tenants/...` physical layout for refs, objects, intents and cache paths. R1 stays in `comb/v2`. `CompleteFeed::open` derives the v3 Store view, without changing logical log identity, and never falls back to legacy state. An absent v3 resource with a matching existing legacy ref is unsupported, not a migration. A separate backend prefix remains an acceptance precaution; namespace separation supplies writer exclusion even when both versions share a backend. See the checked handoff for initialization race tests.
 
 Module ownership stays narrow. `comb-object` owns `get_limited` and backend conformance. `comb-core` owns limited envelope decoding, durable lease-owner types, and portable errors. A new private `combctl::catalog` module owns the chunk tree. `combctl::log` owns `CompleteFeed`, the page types, and `WriterSession`; `publish.rs` remains the only ref-CAS path. Crate extraction is not part of R2.
 
