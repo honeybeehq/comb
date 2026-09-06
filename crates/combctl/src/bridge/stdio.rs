@@ -1,17 +1,30 @@
 //! Stdio JSONL transport: concurrent handlers, bounded admission, serialized stdout.
 
 use super::handler::Bridge;
+use super::handler::SHUTDOWN_BUDGET;
 use super::protocol::{extract_id, parse_request, validate_id, Response};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::Notify;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
+use tokio::time::{timeout, Instant};
+
+struct AbortOnDrop(Arc<Bridge>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub async fn run<R, W>(stdin: R, stdout: W, bridge: Arc<Bridge>) -> anyhow::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let _abort = AbortOnDrop(bridge.clone());
+    let shutdown = Arc::new(Notify::new());
+    let shutdown_started = shutdown.clone();
     let limits = bridge.limits.clone();
     let max_frame_bytes = limits.max_frame_bytes;
     let max_id_len = limits.max_id_len;
@@ -21,9 +34,13 @@ where
         let mut stdout = stdout;
         while let Some(line) = rx.recv().await {
             let line = cap_stdout_frame(line, max_frame_bytes, max_id_len)?;
-            stdout.write_all(line.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            timeout(SHUTDOWN_BUDGET, async {
+                stdout.write_all(line.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("bridge output stalled"))??;
         }
         Ok::<(), anyhow::Error>(())
     });
@@ -36,7 +53,10 @@ where
                 result?;
             }
             match read_jsonl_frame(&mut reader, limits.max_frame_bytes).await? {
-                FrameRead::Eof => break,
+                FrameRead::Eof => {
+                    shutdown_started.notify_one();
+                    break;
+                }
                 FrameRead::Oversized { id } => {
                     tx.send(
                         Response::invalid(id, "request frame exceeds max_frame_bytes").to_jsonl(),
@@ -67,12 +87,28 @@ where
         while let Some(result) = inflight.join_next().await {
             result?;
         }
+        bridge.close().await?;
         Ok::<(), anyhow::Error>(())
     });
     // EOF drains the writer. Either task failing drops this JoinSet, cancelling
     // its peer; dropping the input task also cancels every admitted handler.
-    while let Some(result) = transport.join_next().await {
-        result??;
+    let mut shutdown_deadline = None;
+    while !transport.is_empty() {
+        tokio::select! {
+            result = transport.join_next() => {
+                if let Some(result) = result { result??; }
+            }
+            _ = shutdown.notified(), if shutdown_deadline.is_none() => {
+                shutdown_deadline = Some(Instant::now() + SHUTDOWN_BUDGET);
+            }
+            _ = async {
+                if let Some(deadline) = shutdown_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => anyhow::bail!("bridge shutdown deadline exceeded"),
+        }
     }
     Ok(())
 }

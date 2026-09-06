@@ -30,17 +30,20 @@ fn unix_pair() -> (OwnedReadHalf, OwnedWriteHalf, OwnedReadHalf, OwnedWriteHalf)
 }
 
 fn mem_bridge(limits: Limits) -> Arc<Bridge> {
-    Arc::new(Bridge::new(
-        Store::new(
-            Arc::new(MemoryBackend::new()),
-            "org_t",
-            DigestKey::from_bytes([5u8; 32]),
-            None,
-        ),
-        "comb-bridge".into(),
-        60,
-        limits,
-    ))
+    Arc::new(
+        Bridge::new(
+            Store::new(
+                Arc::new(MemoryBackend::new()),
+                "org_t",
+                DigestKey::from_bytes([5u8; 32]),
+                None,
+            ),
+            "comb-bridge".into(),
+            60,
+            limits,
+        )
+        .unwrap(),
+    )
 }
 
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: Value) {
@@ -96,10 +99,10 @@ async fn stdio_follow_does_not_block_append() {
         .iter()
         .find(|v| v["id"] == "f")
         .expect("follow response");
-    assert_eq!(append["ok"], false, "{append}");
-    assert_eq!(append["error"]["capability"], "durable_idempotency");
-    assert_eq!(follow["ok"], false, "{follow}");
-    assert_eq!(follow["error"]["capability"], "bounded_memory_read");
+    assert_eq!(append["ok"], true, "{append}");
+    assert_eq!(append["first"], "1");
+    assert_eq!(follow["ok"], true, "{follow}");
+    assert_eq!(follow["events"][0]["payload_hex"], "c0ffee");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -229,8 +232,8 @@ async fn binary_loads_local_config_without_printing_keys() {
         .find(|v| v["id"] == "a")
         .expect("append response");
     assert_eq!(hello["ok"], true, "{hello}");
-    assert_eq!(append["ok"], false, "{append}");
-    assert_eq!(append["error"]["capability"], "durable_idempotency");
+    assert_eq!(append["ok"], true, "{append}");
+    assert_eq!(append["first"], "1");
 
     drop(stdin);
     let err = tokio::time::timeout(Duration::from_secs(5), child.wait())

@@ -4,7 +4,7 @@ The bridge is Comb's long-lived machine interface for Foundation and similar cli
 Foundation owns its documents and merge semantics. The bridge transports opaque bytes
 and delegates all durable publication, deduplication, and fencing to the shared Log.
 
-Implementation branch: `feat/foundation-bridge`. The first transport is stdio JSONL,
+Implementation branch: `feat/foundation-r2-adapter`, based on `bff2edb`. The first transport is stdio JSONL,
 brokered by the Foundation host. A separate socket server is outside this slice.
 Shared Core and Log implementation proceeds on `feat/reliable-log-r1`.
 
@@ -89,10 +89,39 @@ transport also checks the final encoded frame.
 Uppercase hex is accepted and normalized to lowercase. `max_idempotency_key_len`
 counts wire characters. Strings such as `doc:hash` are invalid keys.
 
-Unknown required capabilities and protocol versions return `unsupported`. Until
-R1 stable publication and R2 bounded reads are wired, hello advertises those
-capabilities as false and the dependent operations return `unsupported`. The
-Foundation host must require both before offering distributed document sync.
+Unknown required capabilities and protocol versions return `unsupported`. The V3
+adapter uses `CompleteFeed`, `LogReader`, and `WriterSession` for every storage
+operation and advertises durable idempotency and bounded-memory reads. The Foundation
+host must require both. These flags describe adapter support; deployment readiness
+still requires the immutable-binary backend capture and fresh-Loro gates below.
+
+The process caches at most 256 logical feeds and creates one lazy writer session per
+feed, on its first append. Parallel first requests share initialization. Reads and
+hello never acquire publication ownership. The process does not evict Lost sessions
+or silently acquire new ownership; exceeding the feed limit returns `busy`.
+
+`--writer` is a diagnostic label of 1 to 64 bytes. Comb generates each session's
+actual instance identity. `--lease` defaults to 30 seconds and accepts 3 to 600;
+renewal runs every third of the TTL, slack is one sixth, and the acquisition budget
+is 1.5 times the TTL. Comb owns all renewal and fencing. Each call gets the acquisition
+budget plus 15 seconds as its finite deadline. Positive follow waits remain bounded
+separately at 30 seconds; zero and omitted waits call `read_page` immediately.
+
+The adapter uses only Comb's V3 physical layout. Existing legacy feeds return
+`unsupported` with capability `v3_complete_feed`; there is no fallback or migration.
+Read responses use the page's single snapshot and checked next cursor.
+
+Typed errors additionally distinguish `integrity`, `deadline_exceeded`, `cancelled`,
+`lease_held`, and `reacquire_required`. A lost session stays lost for new publication;
+committed-key retries remain available. Error messages describe the loss cause, but
+clients branch on codes. An unavailable, cancelled, or timed-out append may already
+be committed. Retry with the identical key and bytes; do not mint another identity.
+
+EOF permits admitted requests to drain for at most four seconds, including session
+release and output. Release calls share a three-second budget. A blocked output frame
+also has a four-second write budget. Failed shutdown exits unsuccessfully so the
+acceptance client cannot write a success receipt. Cancellation drops the owning
+JoinSets and cached sessions, which stops Comb's renewal tasks.
 
 ## Foundation fixture
 
@@ -167,9 +196,9 @@ checks simulate process I/O only and provide no storage acceptance evidence.
 Keep config directories private; they contain
 the tenant digest key. Use a new backend prefix for each live verification run.
 
-The runner has been checked against the provisional bridge: missing durable
-idempotency causes a nonzero exit and no success receipt. A successful end-to-end
-capture remains pending R1 and R2 integration.
+The runner was previously checked against the provisional bridge: missing durable
+idempotency caused a nonzero exit and no success receipt. Actual immutable-binary
+captures and fresh-Loro reconstruction remain root's integration gate.
 
 Core failure drills must target the interval after manifest publication and before
 the reply. The bridge tests do not introduce their own storage fault protocol.

@@ -110,3 +110,37 @@ async fn oversized_line_across_reader_buffers_preserves_next_request() {
     assert_eq!(next["ok"], true);
     assert_eq!(next["op"], "hello");
 }
+
+#[tokio::test]
+async fn admitted_append_completes_when_stdin_immediately_ends() {
+    let (_directory, mut child) = process(Stdio::piped());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"{\"v\":1,\"id\":\"last-append\",\"op\":\"append\",\"log\":\"doc\",\"idempotency_key\":\"01\",\"payload_hex\":\"00ff80\"}\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(8), child.wait_with_output())
+        .await
+        .expect("EOF append did not finish")
+        .unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["id"], "last-append");
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["first"], "1");
+    assert_eq!(response["cursor"], "2");
+}
+
+#[tokio::test]
+async fn eof_with_long_follow_cannot_hang_process_shutdown() {
+    let (_directory, mut child) = process(Stdio::piped());
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"{\"v\":1,\"id\":\"pending\",\"op\":\"follow\",\"log\":\"doc\",\"cursor\":\"1\",\"timeout_ms\":30000}\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(7), child.wait_with_output())
+        .await
+        .expect("EOF must bound long-follow shutdown")
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "unfinished follow cannot produce a clean close"
+    );
+}

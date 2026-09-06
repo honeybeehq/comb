@@ -41,6 +41,7 @@ fn mem_bridge() -> Bridge {
         60,
         Limits::default(),
     )
+    .unwrap()
 }
 
 async fn rpc(bridge: &Bridge, v: Value) -> Value {
@@ -120,35 +121,14 @@ fn maximum_raw_page_leaves_space_for_all_event_metadata() {
 }
 
 #[tokio::test]
-async fn head_without_representable_next_cursor_returns_error() {
+async fn legacy_manifest_is_not_read_as_v3() {
     let store = Store::new(
         Arc::new(MemoryBackend::new()),
-        "org_head_overflow",
+        "org_legacy",
         DigestKey::from_bytes([7; 32]),
         None,
     );
-    let manifest = json!({
-        "schema":combctl::log::MANIFEST_SCHEMA, "log":"log/doc/p0",
-        "header": {
-            "schema": comb_core::HEADER_SCHEMA,
-            "resource": "log/doc/p0", "generation": 1, "epoch": 0,
-            "identity": store.mint_operation().to_string(),
-            "request": store.key.digest(b"head-overflow-fixture"),
-            "parent": null, "skip": null, "at": chrono::Utc::now(),
-        },
-        "epoch":0, "head_seq":u64::MAX, "chunks":[], "segments":[], "trim_before_seq":0,
-        "retention":"trimmable", "stable_index":null,
-    });
-    let (digest, _) = store
-        .put_blob(serde_json::to_vec(&manifest).unwrap())
-        .await
-        .unwrap();
-    // Seed malformed storage through the test backend. Core mutations must
-    // not bypass Log ownership just to construct this boundary fixture.
-    let mut head = comb_core::RefValue::new(&store.tenant, "log/doc/p0");
-    head.generation = 1;
-    head.target = Some(digest.clone());
-    head.head_commit = Some(digest);
+    let head = comb_core::RefValue::new(&store.tenant, "log/doc/p0");
     store
         .backend
         .put_update(
@@ -158,19 +138,15 @@ async fn head_without_representable_next_cursor_returns_error() {
         )
         .await
         .unwrap();
-    let bridge = Bridge::new(store, "test-writer".into(), 60, limits());
+    let bridge = Bridge::new(store, "test-writer".into(), 30, limits()).unwrap();
     let response = rpc(
         &bridge,
-        json!({"v":1,"id":"head-overflow","op":"head","log":"doc"}),
+        json!({"v":1,"id":"legacy","op":"head","log":"doc"}),
     )
     .await;
-    assert_eq!(response["id"], "head-overflow");
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"]["code"], "backend_unavailable");
-    assert_eq!(
-        response["error"]["message"],
-        "log head has no representable next cursor"
-    );
+    assert_eq!(response["id"], "legacy");
+    assert_eq!(response["error"]["code"], "unsupported");
+    assert_eq!(response["error"]["capability"], "v3_complete_feed");
     assert!(response.get("cursor").is_none());
 }
 
@@ -313,8 +289,8 @@ async fn hello_advertises_honest_capabilities() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["op"], "hello");
     assert_eq!(v["protocol"], 1);
-    assert_eq!(v["capabilities"]["durable_idempotency"], false);
-    assert_eq!(v["capabilities"]["bounded_memory_read"], false);
+    assert_eq!(v["capabilities"]["durable_idempotency"], true);
+    assert_eq!(v["capabilities"]["bounded_memory_read"], true);
     assert_eq!(v["capabilities"]["payload_hex"], true);
     assert_eq!(v["limits"]["max_append_events"], 1);
     assert_eq!(v["limits"]["max_idempotency_key_len"], 1024);
@@ -327,17 +303,17 @@ async fn hello_require_unavailable_is_unsupported() {
     let b = mem_bridge();
     let v = rpc(
         &b,
-        json!({"v":1,"id":"h","op":"hello","require":["durable_idempotency"]}),
+        json!({"v":1,"id":"h","op":"hello","require":["future_capability"]}),
     )
     .await;
     assert_eq!(v["id"], "h");
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "unsupported");
-    assert_eq!(v["error"]["capability"], "durable_idempotency");
+    assert_eq!(v["error"]["capability"], "future_capability");
 }
 
 #[tokio::test]
-async fn keyed_append_is_unsupported_and_does_not_append() {
+async fn keyed_append_publishes_a_v3_event() {
     let b = mem_bridge();
     let v = rpc(
         &b,
@@ -352,18 +328,19 @@ async fn keyed_append_is_unsupported_and_does_not_append() {
     )
     .await;
     assert_eq!(v["id"], "a");
-    assert_eq!(v["ok"], false);
-    assert_eq!(v["error"]["code"], "unsupported");
-    assert_eq!(v["error"]["capability"], "durable_idempotency");
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["first"], "1");
+    assert_eq!(v["last"], "1");
+    assert_eq!(v["cursor"], "2");
 
     let head = rpc(&b, json!({"v":1,"id":"h","op":"head","log":"doc1"})).await;
     assert_eq!(head["id"], "h");
     assert_eq!(head["ok"], true);
-    assert_eq!(head["head"], "0");
+    assert_eq!(head["head"], "1");
 }
 
 #[tokio::test]
-async fn read_and_follow_are_unsupported_and_keep_id() {
+async fn empty_read_and_follow_keep_id_and_cursor() {
     let b = mem_bridge();
     let read = rpc(
         &b,
@@ -371,9 +348,9 @@ async fn read_and_follow_are_unsupported_and_keep_id() {
     )
     .await;
     assert_eq!(read["id"], "r");
-    assert_eq!(read["ok"], false);
-    assert_eq!(read["error"]["code"], "unsupported");
-    assert_eq!(read["error"]["capability"], "bounded_memory_read");
+    assert_eq!(read["ok"], true, "{read}");
+    assert_eq!(read["next_cursor"], "1");
+    assert_eq!(read["events"], json!([]));
 
     let follow = rpc(
         &b,
@@ -381,9 +358,9 @@ async fn read_and_follow_are_unsupported_and_keep_id() {
     )
     .await;
     assert_eq!(follow["id"], "f");
-    assert_eq!(follow["ok"], false);
-    assert_eq!(follow["error"]["code"], "unsupported");
-    assert_eq!(follow["error"]["capability"], "bounded_memory_read");
+    assert_eq!(follow["ok"], true, "{follow}");
+    assert_eq!(follow["next_cursor"], "1");
+    assert_eq!(follow["timed_out"], true);
 }
 
 #[test]
@@ -395,12 +372,9 @@ fn error_code_wire_names() {
 }
 
 #[tokio::test]
-async fn fixture_shaped_append_is_unsupported() {
+async fn fixture_payload_roundtrips_through_v3() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/testing/fixtures/foundation-bridge.json");
-    if !path.exists() {
-        return;
-    }
     let raw = std::fs::read_to_string(&path).unwrap();
     let fixture: Value = serde_json::from_str(&raw).unwrap();
     let b = mem_bridge();
@@ -418,8 +392,13 @@ async fn fixture_shaped_append_is_unsupported() {
     )
     .await;
     assert_eq!(v["id"], "a0");
-    assert_eq!(v["ok"], false);
-    assert_eq!(v["error"]["capability"], "durable_idempotency");
+    assert_eq!(v["ok"], true, "{v}");
+    let page = rpc(
+        &b,
+        json!({"v":1,"id":"r","op":"read","log":"foundation","cursor":"1"}),
+    )
+    .await;
+    assert_eq!(page["events"][0]["payload_hex"], change["payload_hex"]);
 }
 
 #[test]

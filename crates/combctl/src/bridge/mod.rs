@@ -7,3 +7,5 @@ pub mod handler;
 pub mod limits;
 pub mod protocol;
 pub mod stdio;
+
+pub mod errors;

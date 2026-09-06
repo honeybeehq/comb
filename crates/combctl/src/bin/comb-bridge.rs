@@ -26,11 +26,11 @@ struct Cli {
     /// Config directory (default: ./.comb)
     #[arg(long)]
     dir: Option<PathBuf>,
-    /// Writer identity used for Log leases. Unique per process when omitted.
+    /// Diagnostic writer label, 1..64 bytes. Comb generates publication identity.
     #[arg(long)]
     writer: Option<String>,
     /// Lease TTL in seconds for appends
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 30)]
     lease: i64,
 }
 
@@ -81,6 +81,6 @@ async fn run() -> Result<()> {
         ),
     };
     let store = Store::new(backend, cfg.tenant.clone(), key, cache_dir);
-    let bridge = Arc::new(Bridge::new(store, writer, cli.lease, Limits::default()));
+    let bridge = Arc::new(Bridge::new(store, writer, cli.lease, Limits::default())?);
     stdio::run(tokio::io::stdin(), tokio::io::stdout(), bridge).await
 }

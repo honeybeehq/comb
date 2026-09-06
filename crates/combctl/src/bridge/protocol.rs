@@ -11,7 +11,7 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // append payload/key are validated now and held for shared-API wiring
+#[allow(dead_code)] // normalized payload hex is retained alongside its decoded bytes
 pub enum Request {
     Hello {
         id: String,
@@ -69,9 +69,9 @@ impl Capabilities {
     pub fn offered() -> Self {
         Self {
             ops: vec!["hello", "append", "head", "read", "follow"],
-            // Shared Log has no stable append key and no bounded read yet.
-            durable_idempotency: false,
-            bounded_memory_read: false,
+            // Implemented by checked V3 CompleteFeed and WriterSession.
+            durable_idempotency: true,
+            bounded_memory_read: true,
             payload_hex: true,
         }
     }
@@ -114,7 +114,6 @@ pub enum Response {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-#[allow(dead_code)] // Append/Page are the frozen success shapes, wired with shared APIs
 pub enum OkBody {
     Hello {
         protocol: u32,
@@ -167,6 +166,11 @@ pub enum ErrorCode {
     Unsupported,
     Trimmed,
     BackendUnavailable,
+    Integrity,
+    DeadlineExceeded,
+    Cancelled,
+    LeaseHeld,
+    ReacquireRequired,
     Fenced,
     Conflict,
     UnknownOperation,

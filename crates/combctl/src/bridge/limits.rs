@@ -15,8 +15,6 @@ pub struct Limits {
     pub max_log_name_len: usize,
     pub max_id_len: usize,
     pub max_idempotency_key_len: usize,
-    #[allow(dead_code)]
-    pub poll_interval_ms: u64,
 }
 
 impl Default for Limits {
@@ -35,7 +33,6 @@ impl Default for Limits {
             max_log_name_len: 128,
             max_id_len: 128,
             max_idempotency_key_len: 1024,
-            poll_interval_ms: 250,
         }
     }
 }
