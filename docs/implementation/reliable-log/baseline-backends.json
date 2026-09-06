@@ -1,0 +1,14 @@
+[
+  {
+    "backend": "s3",
+    "exit_code": 0,
+    "stdout": "running conformance suite (key prefix comb/v1/tenants/org_comb_verification/conformance/20260906T053557)...\n\n  PASS  create-only enforced                          \n  PASS  read-after-write (create)                     \n  PASS  conditional update with current version       \n  PASS  stale version rejected, content intact        \n  PASS  conditional create on existing key rejected   \n  PASS  guarded update of missing key rejected        \n  PASS  concurrent CAS has exactly one winner         \n  PASS  exists is accurate                            \n  PASS  delete removes; idempotent on missing         \n\nbackend CONFORMS (9 checks)\n",
+    "stderr": ""
+  },
+  {
+    "backend": "minio",
+    "exit_code": 0,
+    "stdout": "running conformance suite (key prefix comb/v1/tenants/org_comb_verification/conformance/20260906T053557)...\n\n  PASS  create-only enforced                          \n  PASS  read-after-write (create)                     \n  PASS  conditional update with current version       \n  PASS  stale version rejected, content intact        \n  PASS  conditional create on existing key rejected   \n  PASS  guarded update of missing key rejected        \n  PASS  concurrent CAS has exactly one winner         \n  PASS  exists is accurate                            \n  PASS  delete removes; idempotent on missing         \n\nbackend CONFORMS (9 checks)\n",
+    "stderr": ""
+  }
+]
