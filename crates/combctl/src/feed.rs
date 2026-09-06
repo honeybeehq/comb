@@ -14,13 +14,15 @@ use chrono::{DateTime, Utc};
 use comb_core::commit::{Admission, CommitHeader};
 use comb_core::error::CoreError;
 use comb_core::operation::{Material, OpIdentity, StableKey};
-use comb_core::{Digest, EnvelopeReadSpec, ObjectKind, RefValue, MAX_MANIFEST_OBJECT_BYTES};
+use comb_core::{
+    Digest, Envelope, EnvelopeReadSpec, ObjectKind, RefValue, MAX_MANIFEST_OBJECT_BYTES,
+};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{watch, Mutex as TokioMutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_PAGE_EVENTS: u32 = 1_024;
@@ -191,6 +193,12 @@ impl WriterInstanceId {
     pub fn canonical(&self) -> String {
         hex::encode(self.0)
     }
+
+    fn try_from_canonical(s: &str) -> Option<Self> {
+        let bytes = hex::decode(s).ok()?;
+        let arr: [u8; 16] = bytes.try_into().ok()?;
+        Some(Self(arr))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -359,13 +367,27 @@ impl CompleteFeed {
         match timed(call, v3.read_head(&resource)).await? {
             None => {
                 let v2 = (*store).clone().with_layout(KeyLayout::V2);
-                if timed(call, v2.backend.exists(&v2.ref_key(&resource))).await? {
+                if timed(call, async {
+                    v2.backend
+                        .exists(&v2.ref_key(&resource))
+                        .await
+                        .map_err(anyhow::Error::from)
+                })
+                .await?
+                {
                     return Err(OpenLogError::UnsupportedManifestSchema {
                         found: MANIFEST_V2.into(),
                         required: COMPLETE_MANIFEST_SCHEMA,
                     });
                 }
-                if timed(call, v2.backend.exists(&v2.v1_ref_key(&resource))).await? {
+                if timed(call, async {
+                    v2.backend
+                        .exists(&v2.v1_ref_key(&resource))
+                        .await
+                        .map_err(anyhow::Error::from)
+                })
+                .await?
+                {
                     return Err(OpenLogError::UnsupportedManifestSchema {
                         found: "comb/v1".into(),
                         required: COMPLETE_MANIFEST_SCHEMA,
@@ -374,7 +396,10 @@ impl CompleteFeed {
             }
             Some(head) => {
                 if let Some(digest) = head.value.target {
-                    let _ = feed.load_manifest(&digest).await?;
+                    let _ = feed.load_manifest(&digest, call).await?;
+                } else if head.value.generation > 0 {
+                    feed.reject_empty_target_with_manifest(&head.value, call)
+                        .await?;
                 }
             }
         }
@@ -401,11 +426,16 @@ impl CompleteFeed {
             policy,
             state: tx,
             _watch: rx,
-            renew: None,
+            acquire: TokioMutex::new(()),
+            renew: StdMutex::new(None),
         })
     }
 
-    async fn load_manifest(&self, digest: &Digest) -> Result<CompleteLogManifest, OpenLogError> {
+    async fn load_manifest(
+        &self,
+        digest: &Digest,
+        call: &CallContext,
+    ) -> Result<CompleteLogManifest, OpenLogError> {
         let spec = EnvelopeReadSpec {
             tenant: &self.store.tenant,
             kind: ObjectKind::Blob,
@@ -413,22 +443,7 @@ impl CompleteFeed {
             max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
             max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
         };
-        let (payload, _) = self
-            .store
-            .get_blob_limited(digest, spec)
-            .await
-            .map_err(|e| {
-                if let Some(CoreError::UnsupportedEnvelopeFormat { value, .. }) =
-                    e.downcast_ref::<CoreError>()
-                {
-                    OpenLogError::UnsupportedManifestSchema {
-                        found: value.clone(),
-                        required: COMPLETE_MANIFEST_SCHEMA,
-                    }
-                } else {
-                    OpenLogError::Integrity(LogIntegrityError(format!("{e:#}")))
-                }
-            })?;
+        let (payload, _) = timed(call, self.store.get_blob_limited(digest, spec)).await?;
         let raw: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
             OpenLogError::Integrity(LogIntegrityError(format!("manifest json: {e}")))
         })?;
@@ -438,8 +453,45 @@ impl CompleteFeed {
                 required: COMPLETE_MANIFEST_SCHEMA,
             });
         }
-        serde_json::from_value(raw)
-            .map_err(|e| OpenLogError::Integrity(LogIntegrityError(format!("v3 manifest: {e}"))))
+        let manifest: CompleteLogManifest = serde_json::from_value(raw)
+            .map_err(|e| OpenLogError::Integrity(LogIntegrityError(format!("v3 manifest: {e}"))))?;
+        if manifest.header.resource != self.resource || manifest.log != self.resource {
+            return Err(OpenLogError::Integrity(LogIntegrityError(format!(
+                "manifest log {} does not bind resource {}",
+                manifest.log, self.resource
+            ))));
+        }
+        if !matches!(manifest.retention, RetentionMode::Complete) {
+            return Err(OpenLogError::Integrity(LogIntegrityError(
+                "complete feed requires complete retention".into(),
+            )));
+        }
+        Ok(manifest)
+    }
+
+    async fn reject_empty_target_with_manifest(
+        &self,
+        value: &RefValue,
+        call: &CallContext,
+    ) -> Result<(), OpenLogError> {
+        let Some(commit) = &value.head_commit else {
+            return Ok(());
+        };
+        let spec = EnvelopeReadSpec {
+            tenant: &self.store.tenant,
+            kind: ObjectKind::Blob,
+            allowed_schemas: MANIFEST_SCHEMAS,
+            max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
+            max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
+        };
+        match timed(call, self.store.get_blob_limited(commit, spec)).await {
+            Ok(_) => Err(OpenLogError::Integrity(LogIntegrityError(
+                "existing ref has a v3 manifest commit but no target".into(),
+            ))),
+            Err(OpenLogError::UnsupportedManifestSchema { .. }) => Ok(()),
+            Err(OpenLogError::Integrity(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -475,19 +527,26 @@ impl LogReader for CompleteFeed {
                 trim_before_seq: 0,
             },
             Some(h) => {
-                let head_seq = if let Some(d) = &h.value.target {
-                    self.load_manifest(d).await.map_err(open_to_read)?.head_seq
+                let (head_seq, trim_before_seq) = if let Some(d) = &h.value.target {
+                    let m = self.load_manifest(d, call).await.map_err(open_to_read)?;
+                    if m.epoch != h.value.epoch {
+                        return Err(ReadError::Integrity(LogIntegrityError(format!(
+                            "manifest epoch {} disagrees with ref {}",
+                            m.epoch, h.value.epoch
+                        ))));
+                    }
+                    (m.head_seq, m.trim_before_seq)
                 } else {
-                    0
+                    (0, 0)
                 };
                 CompleteFeedHead {
                     generation: h.value.generation,
                     head_seq,
                     next: Cursor {
                         partition: 0,
-                        next_seq: head_seq + 1,
+                        next_seq: checked_next(head_seq, "head")?,
                     },
-                    trim_before_seq: 0,
+                    trim_before_seq,
                 }
             }
         })
@@ -544,6 +603,10 @@ impl LogReader for CompleteFeed {
         }
         let wait_until = tokio::time::Instant::now() + wait.0;
         let deadline = call.deadline.min(wait_until);
+        let follow_call = CallContext {
+            deadline,
+            cancellation: call.cancellation.clone(),
+        };
         loop {
             tokio::select! {
                 _ = self.wake.notified() => {}
@@ -556,7 +619,7 @@ impl LogReader for CompleteFeed {
                     return Err(ReadError::DeadlineExceeded);
                 }
             }
-            let page = self.read_page(cursor, limits, call).await?;
+            let page = self.read_page(cursor, limits, &follow_call).await?;
             if !page.events.is_empty() {
                 return Ok(FollowPage {
                     page,
@@ -580,12 +643,7 @@ impl CompleteFeed {
         limits: ReadLimits,
         call: &CallContext,
     ) -> Result<ReadPage, ReadError> {
-        let _ = call;
-        let snapshot = self
-            .store
-            .read_head(&self.resource)
-            .await
-            .map_err(any_read)?;
+        let snapshot = timed_read(call, self.store.read_head(&self.resource), "read_head").await?;
         let Some(head) = snapshot else {
             if cursor.next_seq == 1 {
                 return Ok(ReadPage {
@@ -616,13 +674,23 @@ impl CompleteFeed {
                 next_at_head: Cursor::first(0),
             });
         };
-        let manifest = self.load_manifest(digest).await.map_err(open_to_read)?;
+        let manifest = self
+            .load_manifest(digest, call)
+            .await
+            .map_err(open_to_read)?;
+        if manifest.epoch != head.value.epoch {
+            return Err(ReadError::Integrity(LogIntegrityError(format!(
+                "manifest epoch {} disagrees with ref {}",
+                manifest.epoch, head.value.epoch
+            ))));
+        }
         let head_seq = manifest.head_seq;
+        let at_head_seq = checked_next(head_seq, "snapshot head")?;
         let at_head_cursor = Cursor {
             partition: 0,
-            next_seq: head_seq + 1,
+            next_seq: at_head_seq,
         };
-        if cursor.next_seq == 0 || cursor.next_seq > head_seq + 1 {
+        if cursor.next_seq == 0 || cursor.next_seq > at_head_seq {
             return Err(ReadError::InvalidCursor {
                 requested: cursor,
                 next_at_head: at_head_cursor,
@@ -633,11 +701,11 @@ impl CompleteFeed {
                 requested: cursor,
                 resume_at: Cursor {
                     partition: 0,
-                    next_seq: manifest.trim_before_seq + 1,
+                    next_seq: checked_next(manifest.trim_before_seq, "trim")?,
                 },
             });
         }
-        if cursor.next_seq == head_seq + 1 {
+        if cursor.next_seq == at_head_seq {
             return Ok(ReadPage {
                 events: Vec::new(),
                 next: cursor,
@@ -651,26 +719,31 @@ impl CompleteFeed {
         let mut expected = cursor.next_seq;
         let mut seq = expected;
         while seq <= head_seq && events.len() < limits.max_events.get() as usize {
-            let Some(refs) = catalog::seek_leaf(&self.store, &manifest.catalog, seq)
-                .await
-                .map_err(|e| ReadError::Integrity(LogIntegrityError(format!("{e:#}"))))?
-            else {
-                return Err(ReadError::Integrity(LogIntegrityError(
-                    "catalog has no leaf for sequence".into(),
-                )));
-            };
+            let refs = timed_read(
+                call,
+                catalog::seek_leaf(&self.store, &manifest.catalog, seq),
+                "catalog",
+            )
+            .await?
+            .ok_or_else(|| {
+                ReadError::Integrity(LogIntegrityError("catalog has no leaf for sequence".into()))
+            })?;
             let Some(chunk_ref) = refs
                 .iter()
                 .find(|r| seq >= r.first_seq && seq <= r.last_seq)
+                .cloned()
             else {
                 return Err(ReadError::Integrity(LogIntegrityError(
                     "leaf does not cover sequence".into(),
                 )));
             };
-            let frames = self.load_chunk(chunk_ref).await?;
+            let frames = self.load_chunk(&chunk_ref, head_seq, call).await?;
             for frame in frames {
                 if frame.seq < seq {
                     continue;
+                }
+                if frame.seq > head_seq || frame.seq > chunk_ref.last_seq {
+                    break;
                 }
                 if frame.seq != expected {
                     return Err(ReadError::Integrity(LogIntegrityError(format!(
@@ -692,7 +765,7 @@ impl CompleteFeed {
                 }
                 if !events.is_empty()
                     && (events.len() as u32 >= limits.max_events.get()
-                        || raw + n > limits.max_raw_bytes.get())
+                        || raw.saturating_add(n) > limits.max_raw_bytes.get())
                 {
                     return Ok(ReadPage {
                         events,
@@ -713,16 +786,26 @@ impl CompleteFeed {
                     committed_at: frame.at,
                     payload: Bytes::from(frame.payload),
                 });
-                raw += n;
-                expected = frame.seq + 1;
+                raw = raw.checked_add(n).ok_or_else(|| {
+                    ReadError::Integrity(LogIntegrityError("raw byte overflow".into()))
+                })?;
+                expected = checked_next(frame.seq, "frame")?;
                 seq = expected;
                 if events.len() >= limits.max_events.get() as usize {
                     break;
                 }
             }
+            if seq <= chunk_ref.last_seq
+                && seq <= head_seq
+                && events.len() < limits.max_events.get() as usize
+            {
+                return Err(ReadError::Integrity(LogIntegrityError(
+                    "chunk ended before catalog last_seq".into(),
+                )));
+            }
         }
         Ok(ReadPage {
-            at_head: expected == head_seq + 1,
+            at_head: expected == at_head_seq,
             events,
             next: Cursor {
                 partition: 0,
@@ -733,7 +816,12 @@ impl CompleteFeed {
         })
     }
 
-    async fn load_chunk(&self, chunk: &CatalogChunkRef) -> Result<Vec<Frame>, ReadError> {
+    async fn load_chunk(
+        &self,
+        chunk: &CatalogChunkRef,
+        snapshot_head: u64,
+        call: &CallContext,
+    ) -> Result<Vec<Frame>, ReadError> {
         let spec = EnvelopeReadSpec {
             tenant: &self.store.tenant,
             kind: ObjectKind::Blob,
@@ -741,15 +829,18 @@ impl CompleteFeed {
             max_encoded_bytes: NonZeroU64::new(MAX_CHUNK_OBJECT_BYTES).unwrap(),
             max_plaintext_bytes: NonZeroU64::new(MAX_CHUNK_PLAINTEXT_BYTES).unwrap(),
         };
-        let (payload, _) = self
-            .store
-            .get_blob_limited(&chunk.digest, spec)
-            .await
-            .map_err(|e| ReadError::Integrity(LogIntegrityError(format!("{e:#}"))))?;
-        if payload.len() as u64 > chunk.plaintext_bytes {
-            return Err(ReadError::Integrity(LogIntegrityError(
-                "chunk plaintext exceeds catalog ref".into(),
-            )));
+        let (payload, _) = timed_read(
+            call,
+            self.store.get_blob_limited(&chunk.digest, spec),
+            "chunk",
+        )
+        .await?;
+        if payload.len() as u64 != chunk.plaintext_bytes {
+            return Err(ReadError::Integrity(LogIntegrityError(format!(
+                "chunk plaintext {} != catalog {}",
+                payload.len(),
+                chunk.plaintext_bytes
+            ))));
         }
         let body: ChunkBody = serde_json::from_slice(&payload)
             .map_err(|e| ReadError::Integrity(LogIntegrityError(format!("chunk json: {e}"))))?;
@@ -758,9 +849,43 @@ impl CompleteFeed {
                 "chunk schema".into(),
             )));
         }
-        if body.frames.len() as u32 > MAX_CHUNK_EVENTS {
+        if body.frames.is_empty() {
             return Err(ReadError::Integrity(LogIntegrityError(
-                "chunk event count".into(),
+                "chunk has no frames".into(),
+            )));
+        }
+        if body.frames.len() as u32 != chunk.event_count
+            || body.frames.len() as u32 > MAX_CHUNK_EVENTS
+        {
+            return Err(ReadError::Integrity(LogIntegrityError(
+                "chunk event count disagrees with catalog".into(),
+            )));
+        }
+        let mut raw = 0u64;
+        let mut expected = chunk.first_seq;
+        for frame in &body.frames {
+            if frame.seq != expected {
+                return Err(ReadError::Integrity(LogIntegrityError(format!(
+                    "chunk frames are not contiguous at {}",
+                    frame.seq
+                ))));
+            }
+            if frame.seq > snapshot_head || frame.seq > chunk.last_seq {
+                return Err(ReadError::Integrity(LogIntegrityError(
+                    "chunk frame exceeds snapshot or catalog range".into(),
+                )));
+            }
+            raw = raw.checked_add(frame.payload.len() as u64).ok_or_else(|| {
+                ReadError::Integrity(LogIntegrityError("chunk raw overflow".into()))
+            })?;
+            expected = checked_next(expected, "chunk frame")?;
+        }
+        let last = expected.checked_sub(1).ok_or_else(|| {
+            ReadError::Integrity(LogIntegrityError("chunk sequence underflow".into()))
+        })?;
+        if last != chunk.last_seq || raw != chunk.raw_payload_bytes {
+            return Err(ReadError::Integrity(LogIntegrityError(
+                "chunk first/last/raw bytes disagree with catalog".into(),
             )));
         }
         Ok(body.frames)
@@ -788,7 +913,8 @@ pub struct WriterSession {
     policy: LeasePolicy,
     state: watch::Sender<WriterState>,
     _watch: watch::Receiver<WriterState>,
-    renew: Option<tokio::task::JoinHandle<()>>,
+    acquire: TokioMutex<()>,
+    renew: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl WriterSession {
@@ -801,69 +927,186 @@ impl WriterSession {
     }
 
     async fn acquire(&self, call: &CallContext) -> Result<u64, LeaseError> {
-        match &*self.state.borrow() {
-            WriterState::Active { epoch, .. } => return Ok(*epoch),
-            WriterState::Lost { cause, .. } => {
-                return Err(LeaseError::ReacquireRequired {
-                    cause: cause.clone(),
-                })
-            }
-            WriterState::Closed => {
-                return Err(LeaseError::ReacquireRequired {
-                    cause: SessionLoss::OwnerChanged,
-                })
-            }
-            _ => {}
+        let _guard = self.acquire.lock().await;
+        if let Some(epoch) = self.active_epoch()? {
+            return Ok(epoch);
         }
         let _ = self.state.send(WriterState::Acquiring { held_until: None });
         let op = self.feed.store.mint_operation();
-        let ttl = self.policy.ttl.as_secs() as i64;
+        let ttl = self.policy.ttl.as_secs().max(1) as i64;
         let acquire_until = tokio::time::Instant::now() + self.policy.initial_acquire_budget;
         let deadline = call.deadline.min(acquire_until);
+        let acquire_call = CallContext {
+            deadline,
+            cancellation: call.cancellation.clone(),
+        };
         loop {
-            if call.cancellation.is_cancelled() {
+            if acquire_call.cancellation.is_cancelled() {
                 return Err(LeaseError::Cancelled);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(LeaseError::DeadlineExceeded);
             }
-            match self
-                .feed
-                .store
-                .claim(
+            match timed_lease(
+                &acquire_call,
+                self.feed.store.claim(
                     op,
                     &self.feed.resource,
                     &self.instance.canonical(),
                     ttl,
                     false,
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(out) => {
-                    let until = Utc::now() + chrono::Duration::seconds(ttl);
+                    let snapshot = timed_lease(
+                        &acquire_call,
+                        self.feed.store.read_head(&self.feed.resource),
+                    )
+                    .await?
+                    .ok_or(LeaseError::Unavailable)?;
+                    let lease = snapshot
+                        .value
+                        .lease
+                        .as_ref()
+                        .ok_or(LeaseError::Unavailable)?;
+                    if lease.writer != self.instance.canonical()
+                        || snapshot.value.epoch != out.epoch
+                    {
+                        self.lose(SessionLoss::OwnerChanged);
+                        return Err(LeaseError::ReacquireRequired {
+                            cause: SessionLoss::OwnerChanged,
+                        });
+                    }
                     let _ = self.state.send(WriterState::Active {
                         epoch: out.epoch,
-                        lease_until: until,
+                        lease_until: lease.lease_until,
                     });
+                    self.spawn_renew(out.epoch);
                     return Ok(out.epoch);
                 }
-                Err(e) => {
-                    if let Some(CoreError::LeaseHeld { holder, until }) = e.downcast_ref() {
-                        let _until_ts = DateTime::parse_from_rfc3339(until)
-                            .map(|d| d.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now());
-                        let _ = holder;
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-                            _ = call.cancellation.cancelled() => return Err(LeaseError::Cancelled),
-                            _ = tokio::time::sleep_until(deadline) => return Err(LeaseError::DeadlineExceeded),
+                Err(LeaseError::LeaseHeld { owner, until }) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                        _ = acquire_call.cancellation.cancelled() => return Err(LeaseError::Cancelled),
+                        _ = tokio::time::sleep_until(deadline) => {
+                            return Err(LeaseError::LeaseHeld { owner, until });
                         }
-                        continue;
                     }
-                    return Err(LeaseError::Unavailable);
                 }
+                Err(e) => return Err(e),
             }
         }
+    }
+
+    fn active_epoch(&self) -> Result<Option<u64>, LeaseError> {
+        let now = self.feed.store.clock().now();
+        let slack = chrono::Duration::from_std(self.policy.clock_slack)
+            .unwrap_or_else(|_| chrono::Duration::seconds(0));
+        let st = self.state.borrow().clone();
+        match st {
+            WriterState::Active { epoch, lease_until } => {
+                if lease_until <= now + slack {
+                    self.lose(SessionLoss::LeaseExpired);
+                    return Err(LeaseError::ReacquireRequired {
+                        cause: SessionLoss::LeaseExpired,
+                    });
+                }
+                Ok(Some(epoch))
+            }
+            WriterState::Lost { cause, .. } => Err(LeaseError::ReacquireRequired { cause }),
+            WriterState::Closed => Err(LeaseError::ReacquireRequired {
+                cause: SessionLoss::OwnerChanged,
+            }),
+            _ => Ok(None),
+        }
+    }
+
+    fn lose(&self, cause: SessionLoss) {
+        self.abort_renew();
+        let st = self.state.borrow().clone();
+        let epoch = match st {
+            WriterState::Active { epoch, .. } => Some(epoch),
+            WriterState::Lost { epoch, .. } => epoch,
+            _ => None,
+        };
+        let _ = self.state.send(WriterState::Lost { epoch, cause });
+    }
+
+    fn take_renew(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.renew.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    fn abort_renew(&self) {
+        if let Some(h) = self.take_renew() {
+            h.abort();
+        }
+    }
+
+    async fn stop_renew(&self) {
+        self.abort_renew();
+        tokio::task::yield_now().await;
+    }
+
+    fn spawn_renew(&self, epoch: u64) {
+        let mut slot = match self.renew.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if slot.is_some() {
+            return;
+        }
+        let store = self.feed.store.clone();
+        let resource = self.feed.resource.clone();
+        let instance = self.instance.canonical();
+        let policy = self.policy;
+        let state = self.state.clone();
+        *slot = Some(tokio::spawn(async move {
+            let ttl = policy.ttl.as_secs().max(1) as i64;
+            loop {
+                tokio::time::sleep(policy.renew_every).await;
+                match &*state.borrow() {
+                    WriterState::Active { epoch: e, .. } if *e == epoch => {}
+                    _ => return,
+                }
+                match store.renew_lease(&resource, epoch, ttl).await {
+                    Ok(value) => {
+                        let Some(lease) = value.lease.as_ref() else {
+                            let _ = state.send(WriterState::Lost {
+                                epoch: Some(epoch),
+                                cause: SessionLoss::RenewalUncertain,
+                            });
+                            return;
+                        };
+                        if lease.writer != instance || value.epoch != epoch {
+                            let _ = state.send(WriterState::Lost {
+                                epoch: Some(epoch),
+                                cause: SessionLoss::OwnerChanged,
+                            });
+                            return;
+                        }
+                        let _ = state.send(WriterState::Active {
+                            epoch,
+                            lease_until: lease.lease_until,
+                        });
+                    }
+                    Err(e) => {
+                        let cause = match e.downcast_ref::<CoreError>() {
+                            Some(CoreError::Fenced { live, .. }) => {
+                                SessionLoss::Fenced { live_epoch: *live }
+                            }
+                            _ => SessionLoss::RenewalUncertain,
+                        };
+                        let _ = state.send(WriterState::Lost {
+                            epoch: Some(epoch),
+                            cause,
+                        });
+                        return;
+                    }
+                }
+            }
+        }));
     }
 
     pub async fn append_stable(
@@ -872,7 +1115,7 @@ impl WriterSession {
         payload: Bytes,
         call: &CallContext,
     ) -> Result<StableAppendReceipt, StableAppendError> {
-        if payload.is_empty() {
+        if payload.is_empty() || payload.len() as u64 > MAX_CHUNK_RAW_BYTES {
             return Err(StableAppendError::InvalidInput);
         }
         let payload_hash = StableKey::payload_hash(&self.feed.store.key, &payload);
@@ -883,33 +1126,46 @@ impl WriterSession {
             if tokio::time::Instant::now() >= call.deadline {
                 return Err(StableAppendError::DeadlineExceeded);
             }
-            let snapshot = self
-                .feed
-                .store
-                .read_head(&self.feed.resource)
+            let snapshot = timed_lease(call, self.feed.store.read_head(&self.feed.resource))
                 .await
-                .map_err(|_| StableAppendError::Unavailable)?
+                .map_err(StableAppendError::Lease)?
                 .unwrap_or_else(|| HeadSnapshot {
                     value: RefValue::new(&self.feed.store.tenant, &self.feed.resource),
                     version: None,
                 });
             if let Some(digest) = &snapshot.value.target {
-                let manifest = self.feed.load_manifest(digest).await.map_err(|e| match e {
-                    OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
-                    _ => StableAppendError::Unavailable,
-                })?;
-                let found = hamt::lookup(
-                    &self.feed.store,
-                    &manifest.stable_index,
-                    &key,
-                    &self.feed.logical,
-                    IndexHead {
-                        generation: snapshot.value.generation,
-                        head_seq: manifest.head_seq,
-                    },
+                let manifest =
+                    self.feed
+                        .load_manifest(digest, call)
+                        .await
+                        .map_err(|e| match e {
+                            OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
+                            OpenLogError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+                            OpenLogError::Cancelled => StableAppendError::Cancelled,
+                            _ => StableAppendError::Unavailable,
+                        })?;
+                let found = timed_read(
+                    call,
+                    hamt::lookup(
+                        &self.feed.store,
+                        &manifest.stable_index,
+                        &key,
+                        &self.feed.logical,
+                        IndexHead {
+                            generation: snapshot.value.generation,
+                            head_seq: manifest.head_seq,
+                        },
+                    ),
+                    "stable-index",
                 )
                 .await
-                .map_err(|e| StableAppendError::Integrity(LogIntegrityError(format!("{e:#}"))))?;
+                .map_err(|e| match e {
+                    ReadError::Integrity(i) => StableAppendError::Integrity(i),
+                    ReadError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+                    ReadError::Cancelled => StableAppendError::Cancelled,
+                    ReadError::Unavailable { .. } => StableAppendError::Unavailable,
+                    other => StableAppendError::Integrity(LogIntegrityError(format!("{other:?}"))),
+                })?;
                 match found {
                     Lookup::Found(e) if e.payload_hash == payload_hash => {
                         return Ok(StableAppendReceipt {
@@ -931,17 +1187,24 @@ impl WriterSession {
                 }
             }
             let epoch = self.acquire(call).await.map_err(StableAppendError::Lease)?;
-            let snapshot = self
-                .feed
-                .store
-                .read_head(&self.feed.resource)
+            let snapshot = timed_lease(call, self.feed.store.read_head(&self.feed.resource))
                 .await
-                .map_err(|_| StableAppendError::Unavailable)?
+                .map_err(StableAppendError::Lease)?
                 .ok_or(StableAppendError::Unavailable)?;
-            match self
-                .feed
-                .store
-                .commit_at_snapshot(
+            let lease = snapshot.value.lease.as_ref();
+            if lease.is_none()
+                || lease.map(|l| l.writer.as_str()) != Some(self.instance.canonical().as_str())
+                || snapshot.value.epoch != epoch
+                || !snapshot.value.lease_live(self.feed.store.clock().now())
+            {
+                self.lose(SessionLoss::OwnerChanged);
+                return Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
+                    cause: SessionLoss::OwnerChanged,
+                }));
+            }
+            match timed_cas(
+                call,
+                self.feed.store.commit_at_snapshot(
                     OpIdentity::Stable(key.clone()),
                     CompleteAppendPlan {
                         resource: self.feed.resource.clone(),
@@ -953,62 +1216,100 @@ impl WriterSession {
                         payload_hash: payload_hash.clone(),
                     },
                     snapshot,
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(CasResult::Committed(p)) => {
                     self.feed.wake.notify_waiters();
                     return Ok(p.outcome);
                 }
                 Ok(CasResult::Conflict) => continue,
-                Err(e) => {
-                    if let Some(CoreError::LeaseHeld { .. }) = e.downcast_ref() {
-                        continue;
-                    }
-                    if let Some(CoreError::Fenced { caller, live }) = e.downcast_ref() {
-                        let _ = self.state.send(WriterState::Lost {
-                            epoch: Some(*caller),
-                            cause: SessionLoss::Fenced { live_epoch: *live },
-                        });
-                        return Err(StableAppendError::Lease(LeaseError::Fenced {
-                            session_epoch: *caller,
-                            live_epoch: *live,
-                        }));
-                    }
-                    return Err(StableAppendError::Unavailable);
+                Err(StableAppendError::Lease(LeaseError::Fenced {
+                    session_epoch,
+                    live_epoch,
+                })) => {
+                    self.lose(SessionLoss::Fenced { live_epoch });
+                    return Err(StableAppendError::Lease(LeaseError::Fenced {
+                        session_epoch,
+                        live_epoch,
+                    }));
                 }
+                Err(StableAppendError::Lease(LeaseError::LeaseHeld { .. })) => {
+                    self.lose(SessionLoss::OwnerChanged);
+                    return Err(StableAppendError::Lease(LeaseError::ReacquireRequired {
+                        cause: SessionLoss::OwnerChanged,
+                    }));
+                }
+                Err(e) => return Err(e),
             }
         }
         Err(StableAppendError::Unavailable)
     }
 
-    pub async fn close(mut self, call: &CallContext) -> Result<(), LeaseError> {
-        if let Some(h) = self.renew.take() {
-            h.abort();
-        }
-        let epoch = match &*self.state.borrow() {
-            WriterState::Active { epoch, .. } => *epoch,
+    pub async fn close(self, call: &CallContext) -> Result<(), LeaseError> {
+        self.stop_renew().await;
+        let st = self.state.borrow().clone();
+        let epoch = match st {
+            WriterState::Active { epoch, .. } => epoch,
             _ => {
                 let _ = self.state.send(WriterState::Closed);
                 return Ok(());
             }
         };
         let op = self.feed.store.mint_operation();
-        let _ = timed_lease(
+        let result = timed_lease(
             call,
             self.feed.store.release(op, &self.feed.resource, epoch),
         )
         .await;
         let _ = self.state.send(WriterState::Closed);
-        Ok(())
+        result.map(|_| ())
     }
 }
 
 impl Drop for WriterSession {
     fn drop(&mut self) {
-        if let Some(h) = self.renew.take() {
-            h.abort();
+        self.abort_renew();
+    }
+}
+
+async fn timed_cas<T>(
+    call: &CallContext,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T, StableAppendError> {
+    tokio::select! {
+        r = fut => r.map_err(cas_from_anyhow),
+        _ = call.cancellation.cancelled() => Err(StableAppendError::Cancelled),
+        _ = tokio::time::sleep_until(call.deadline) => Err(StableAppendError::DeadlineExceeded),
+    }
+}
+
+fn cas_from_anyhow(e: anyhow::Error) -> StableAppendError {
+    match e.downcast_ref::<CoreError>() {
+        Some(CoreError::BackendUnavailable(_)) | Some(CoreError::Io(_)) => {
+            StableAppendError::Unavailable
         }
+        Some(CoreError::Fenced { caller, live }) => StableAppendError::Lease(LeaseError::Fenced {
+            session_epoch: *caller,
+            live_epoch: *live,
+        }),
+        Some(CoreError::LeaseHeld { holder, until }) => {
+            let owner = WriterInstanceId::try_from_canonical(holder)
+                .unwrap_or_else(WriterInstanceId::generate);
+            let until = DateTime::parse_from_rfc3339(until)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            StableAppendError::Lease(LeaseError::LeaseHeld { owner, until })
+        }
+        Some(CoreError::ObjectTooLarge { .. })
+        | Some(CoreError::IntegrityError(_))
+        | Some(CoreError::InvalidFormat(_))
+        | Some(CoreError::RecoveryFailed(_))
+        | Some(CoreError::Rejected(_)) => {
+            StableAppendError::Integrity(LogIntegrityError(format!("{e:#}")))
+        }
+        _ => StableAppendError::Unavailable,
     }
 }
 
@@ -1073,9 +1374,24 @@ impl RefMutationPlan for CompleteAppendPlan {
                 .get_blob_limited(current.target.as_ref().unwrap(), spec)
                 .await?;
             let m: CompleteLogManifest = serde_json::from_slice(&payload)?;
+            if m.log != self.resource || m.header.resource != self.resource {
+                return Err(CoreError::IntegrityError(format!(
+                    "manifest log {} does not bind {}",
+                    m.log, self.resource
+                ))
+                .into());
+            }
+            if !matches!(m.retention, RetentionMode::Complete) {
+                return Err(CoreError::IntegrityError(
+                    "complete feed requires complete retention".into(),
+                )
+                .into());
+            }
             (m.catalog, m.stable_index, m.head_seq)
         };
-        let seq = head_seq + 1;
+        let seq = head_seq
+            .checked_add(1)
+            .ok_or_else(|| CoreError::IntegrityError("sequence overflow".into()))?;
         let frame = Frame {
             seq,
             at: now,
@@ -1093,7 +1409,23 @@ impl RefMutationPlan for CompleteAppendPlan {
             }
             .into());
         }
-        let chunk_digest = ctx.store.key.digest(&chunk_bytes);
+        let chunk_env = Envelope::new(
+            &ctx.store.tenant,
+            ObjectKind::Blob,
+            CHUNK_SCHEMA,
+            chunk_bytes.clone(),
+            &ctx.store.key,
+        );
+        let chunk_encoded = chunk_env.encode()?;
+        if chunk_encoded.len() as u64 > MAX_CHUNK_OBJECT_BYTES {
+            return Err(CoreError::ObjectTooLarge {
+                key: String::new(),
+                limit: MAX_CHUNK_OBJECT_BYTES,
+                actual: Some(chunk_encoded.len() as u64),
+            }
+            .into());
+        }
+        let chunk_digest = chunk_env.meta.digest.clone();
         catalog = catalog::append(
             ctx.store,
             &catalog,
@@ -1154,6 +1486,22 @@ impl RefMutationPlan for CompleteAppendPlan {
             ref_state: Some(ref_state),
         };
         let manifest_bytes = serde_json::to_vec(&manifest)?;
+        let manifest_env = Envelope::new(
+            &ctx.store.tenant,
+            ObjectKind::Blob,
+            COMPLETE_MANIFEST_SCHEMA,
+            manifest_bytes.clone(),
+            &ctx.store.key,
+        );
+        let encoded_manifest = manifest_env.encode()?;
+        if encoded_manifest.len() as u64 > MAX_MANIFEST_OBJECT_BYTES {
+            return Err(CoreError::ObjectTooLarge {
+                key: String::new(),
+                limit: MAX_MANIFEST_OBJECT_BYTES,
+                actual: Some(encoded_manifest.len() as u64),
+            }
+            .into());
+        }
         Ok(PreparedMutation {
             next,
             uploads: vec![
@@ -1181,14 +1529,26 @@ impl RefMutationPlan for CompleteAppendPlan {
     }
 }
 
-async fn timed<T, E>(
+async fn timed<T>(
     call: &CallContext,
-    fut: impl std::future::Future<Output = std::result::Result<T, E>>,
+    fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, OpenLogError> {
     tokio::select! {
-        r = fut => r.map_err(|_| OpenLogError::Unavailable),
+        r = fut => r.map_err(open_from_anyhow),
         _ = call.cancellation.cancelled() => Err(OpenLogError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(OpenLogError::DeadlineExceeded),
+    }
+}
+
+async fn timed_read<T>(
+    call: &CallContext,
+    fut: impl std::future::Future<Output = Result<T>>,
+    operation: &'static str,
+) -> Result<T, ReadError> {
+    tokio::select! {
+        r = fut => r.map_err(|e| read_from_anyhow(e, operation)),
+        _ = call.cancellation.cancelled() => Err(ReadError::Cancelled),
+        _ = tokio::time::sleep_until(call.deadline) => Err(ReadError::DeadlineExceeded),
     }
 }
 
@@ -1197,9 +1557,68 @@ async fn timed_lease<T>(
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, LeaseError> {
     tokio::select! {
-        r = fut => r.map_err(|_| LeaseError::Unavailable),
+        r = fut => r.map_err(lease_from_anyhow),
         _ = call.cancellation.cancelled() => Err(LeaseError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(LeaseError::DeadlineExceeded),
+    }
+}
+
+fn open_from_anyhow(e: anyhow::Error) -> OpenLogError {
+    match e.downcast_ref::<CoreError>() {
+        Some(CoreError::BackendUnavailable(_)) | Some(CoreError::Io(_)) => {
+            OpenLogError::Unavailable
+        }
+        Some(CoreError::UnsupportedEnvelopeFormat { value, .. }) => {
+            OpenLogError::UnsupportedManifestSchema {
+                found: value.clone(),
+                required: COMPLETE_MANIFEST_SCHEMA,
+            }
+        }
+        Some(
+            CoreError::IntegrityError(m)
+            | CoreError::InvalidFormat(m)
+            | CoreError::RecoveryFailed(m),
+        ) => OpenLogError::Integrity(LogIntegrityError(m.clone())),
+        Some(CoreError::ObjectTooLarge { .. }) | Some(CoreError::NotFound(_)) => {
+            OpenLogError::Integrity(LogIntegrityError(format!("{e:#}")))
+        }
+        _ => OpenLogError::Integrity(LogIntegrityError(format!("{e:#}"))),
+    }
+}
+
+fn read_from_anyhow(e: anyhow::Error, operation: &'static str) -> ReadError {
+    match e.downcast_ref::<CoreError>() {
+        Some(CoreError::BackendUnavailable(_)) | Some(CoreError::Io(_)) => {
+            ReadError::Unavailable { operation }
+        }
+        Some(CoreError::Fenced { .. }) | Some(CoreError::Rejected(_)) => {
+            ReadError::Integrity(LogIntegrityError(format!("{e:#}")))
+        }
+        Some(
+            CoreError::IntegrityError(m)
+            | CoreError::InvalidFormat(m)
+            | CoreError::RecoveryFailed(m),
+        ) => ReadError::Integrity(LogIntegrityError(m.clone())),
+        _ => ReadError::Integrity(LogIntegrityError(format!("{e:#}"))),
+    }
+}
+
+fn lease_from_anyhow(e: anyhow::Error) -> LeaseError {
+    match e.downcast_ref::<CoreError>() {
+        Some(CoreError::BackendUnavailable(_)) | Some(CoreError::Io(_)) => LeaseError::Unavailable,
+        Some(CoreError::Fenced { caller, live }) => LeaseError::Fenced {
+            session_epoch: *caller,
+            live_epoch: *live,
+        },
+        Some(CoreError::LeaseHeld { holder, until }) => {
+            let owner = WriterInstanceId::try_from_canonical(holder)
+                .unwrap_or_else(WriterInstanceId::generate);
+            let until = DateTime::parse_from_rfc3339(until)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            LeaseError::LeaseHeld { owner, until }
+        }
+        _ => LeaseError::Unavailable,
     }
 }
 
@@ -1215,12 +1634,9 @@ fn open_to_read(e: OpenLogError) -> ReadError {
     }
 }
 
-fn any_read(e: anyhow::Error) -> ReadError {
-    if let Some(CoreError::BackendUnavailable(_)) = e.downcast_ref() {
-        ReadError::Unavailable { operation: "read" }
-    } else {
-        ReadError::Integrity(LogIntegrityError(format!("{e:#}")))
-    }
+fn checked_next(seq: u64, what: &str) -> Result<u64, ReadError> {
+    seq.checked_add(1)
+        .ok_or_else(|| ReadError::Integrity(LogIntegrityError(format!("{what} sequence overflow"))))
 }
 
 #[cfg(test)]
@@ -1355,5 +1771,202 @@ mod tests {
             err,
             Err(LeaseError::DeadlineExceeded) | Err(LeaseError::LeaseHeld { .. })
         ));
+    }
+
+    fn short_policy() -> LeasePolicy {
+        LeasePolicy {
+            ttl: Duration::from_secs(2),
+            renew_every: Duration::from_millis(200),
+            clock_slack: Duration::from_millis(100),
+            initial_acquire_budget: Duration::from_secs(2),
+        }
+        .validate()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn all_0xff_payload_stays_within_encoded_upload_cap() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "ff".into(), &call())
+            .await
+            .unwrap();
+        let writer = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        let payload = Bytes::from(vec![0xff; 64 * 1024]);
+        let key = StableKey::try_from_canonical(b"ff-key".to_vec()).unwrap();
+        let receipt = writer
+            .append_stable(key, payload.clone(), &call())
+            .await
+            .unwrap();
+        assert_eq!(receipt.range.first, 1);
+        let page = LogReader::read_page(
+            &feed,
+            Cursor::first(0),
+            ReadLimits::try_new(1, MAX_PAGE_RAW_BYTES).unwrap(),
+            &call(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].payload.as_ref(), payload.as_ref());
+        let over = writer
+            .append_stable(
+                StableKey::try_from_canonical(b"too-big".to_vec()).unwrap(),
+                Bytes::from(vec![0xff; MAX_CHUNK_RAW_BYTES as usize + 1]),
+                &call(),
+            )
+            .await;
+        assert!(matches!(over, Err(StableAppendError::InvalidInput)));
+    }
+
+    #[tokio::test]
+    async fn first_event_too_large_does_not_advance_cursor() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "big".into(), &call())
+            .await
+            .unwrap();
+        let writer = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        let key = StableKey::try_from_canonical(b"big1".to_vec()).unwrap();
+        writer
+            .append_stable(key, Bytes::from(vec![b'x'; 64]), &call())
+            .await
+            .unwrap();
+        let cursor = Cursor::first(0);
+        let err = LogReader::read_page(&feed, cursor, ReadLimits::try_new(8, 8).unwrap(), &call())
+            .await
+            .unwrap_err();
+        match err {
+            ReadError::EventTooLarge {
+                cursor: got,
+                event_bytes,
+                max_bytes,
+                ..
+            } => {
+                assert_eq!(got, cursor);
+                assert_eq!(event_bytes, 64);
+                assert_eq!(max_bytes, 8);
+            }
+            other => panic!("expected EventTooLarge, got {other:?}"),
+        }
+        let page = LogReader::read_page(
+            &feed,
+            cursor,
+            ReadLimits::try_new(8, 4096).unwrap(),
+            &call(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.events[0].position.seq, 1);
+        assert_eq!(page.next.next_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn idle_renewal_extends_lease_without_new_session() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "idle".into(), &call())
+            .await
+            .unwrap();
+        let writer = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        writer.ready(&call()).await.unwrap();
+        let WriterState::Active {
+            epoch,
+            lease_until: first,
+        } = writer.state()
+        else {
+            panic!("expected active");
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match writer.state() {
+            WriterState::Active {
+                epoch: e2,
+                lease_until: second,
+            } => {
+                assert_eq!(e2, epoch);
+                assert!(second > first, "renewal must extend lease_until");
+            }
+            other => panic!("expected still active after idle renew, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_instance_takes_over_after_close() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "take-close".into(), &call())
+            .await
+            .unwrap();
+        let a = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        a.ready(&call()).await.unwrap();
+        a.close(&call()).await.unwrap();
+        let b = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), b.ready(&call()))
+            .await
+            .expect("takeover after close timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_instance_takes_over_after_expiry() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "take-exp".into(), &call())
+            .await
+            .unwrap();
+        let policy = short_policy();
+        let c = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), policy)
+            .unwrap();
+        c.ready(&call()).await.unwrap();
+        c.abort_renew();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        match c.state() {
+            WriterState::Active { lease_until, .. } => {
+                assert!(
+                    lease_until <= Utc::now(),
+                    "stopped renew must not extend past ttl, lease_until={lease_until}"
+                );
+            }
+            WriterState::Lost {
+                cause: SessionLoss::LeaseExpired,
+                ..
+            } => {}
+            other => panic!("expected expired active or lost, got {other:?}"),
+        }
+        let err = c.ready(&call()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LeaseError::ReacquireRequired {
+                    cause: SessionLoss::LeaseExpired
+                }
+            ),
+            "{err:?}"
+        );
+        let d = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), policy)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), d.ready(&call()))
+            .await
+            .expect("takeover after expiry timed out")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_of_unacquired_session_does_not_deadlock() {
+        let store = store();
+        let feed = CompleteFeed::open(store, "close".into(), &call())
+            .await
+            .unwrap();
+        let writer = feed
+            .writer_session(WriterLabel::try_from("bridge").unwrap(), short_policy())
+            .unwrap();
+        writer.close(&call()).await.unwrap();
     }
 }
