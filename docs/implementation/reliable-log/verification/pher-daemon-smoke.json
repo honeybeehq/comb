@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "historical_events": 520,
+  "live_events": 2,
+  "crash_restart": true,
+  "cursor_preserved": true,
+  "first_seq": 2,
+  "last_seq": 524,
+  "home": "/tmp/pher-comb-smoke-51w2kmkz/home",
+  "source_commit": "01dbe34c64a92782a635f4b58244474d0f297f14",
+  "binary_sha256": "209d7be064f41e25d105aca1dc3bcfae7d131ac0ee17d316084271ea3f770294",
+  "scope": "Isolated local daemon/socket paging, live delivery and crash restart. Does not verify Comb ObjectLog or catch-up error handling."
+}
