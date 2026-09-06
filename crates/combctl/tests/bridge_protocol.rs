@@ -395,3 +395,10 @@ async fn fixture_shaped_append_is_unsupported() {
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["capability"], "durable_idempotency");
 }
+
+#[test]
+fn extracting_id_from_large_json_preserves_json_escaping() {
+    let id = "quoted\"request\\id";
+    let frame = serde_json::to_vec(&json!({"id":id,"padding":"x".repeat(9000)})).unwrap();
+    assert_eq!(extract_id(&frame), id);
+}

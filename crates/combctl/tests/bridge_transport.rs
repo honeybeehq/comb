@@ -258,3 +258,58 @@ async fn binary_loads_local_config_without_printing_keys() {
         );
     }
 }
+
+#[tokio::test]
+async fn cancelling_transport_closes_its_owned_output() {
+    let (client_read, mut client_write, server_read, server_write) = unix_pair();
+    let bridge = mem_bridge(Limits::default());
+    let server = tokio::spawn(stdio::run(server_read, server_write, bridge));
+    let mut lines = BufReader::new(client_read).lines();
+    write_line(&mut client_write, json!({"v":1,"id":"ready","op":"hello"})).await;
+    tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let closed = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
+    // Clean up even if the implementation detached its reader and writer.
+    // A correctly cancelled peer may already have disconnected this socket.
+    let _ = client_write.shutdown().await;
+    assert!(
+        closed.is_ok(),
+        "cancelling transport left its stdout writer alive"
+    );
+    assert!(closed.unwrap().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn oversized_error_preserves_a_valid_request_id() {
+    let limits = Limits {
+        max_frame_bytes: 1024,
+        ..Limits::default()
+    };
+    let request = json!({"v":1,"id":"known-request","op":"x".repeat(940)});
+    assert!(serde_json::to_vec(&request).unwrap().len() <= limits.max_frame_bytes);
+    let bridge = mem_bridge(limits);
+    let (client_read, mut client_write, server_read, server_write) = unix_pair();
+    let server = tokio::spawn(stdio::run(server_read, server_write, bridge));
+    let mut lines = BufReader::new(client_read).lines();
+    write_line(&mut client_write, request).await;
+    let line = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    client_write.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(line.len() <= 1024);
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(response["id"], "known-request");
+}
