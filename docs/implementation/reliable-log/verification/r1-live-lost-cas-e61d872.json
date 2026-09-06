@@ -1,0 +1,29 @@
+{
+  "source_sha": "e61d872b735d24a5063e8af04abdbf76f211dd1a",
+  "binary_sha256": "f2d6a4e0bfa154b3d2b603c36455a950dad930274016bf5c6189e4681ffab27a",
+  "source_executable": "/Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r1/target/debug/deps/backend_drills-c8c90c49d7b0c1ea",
+  "path": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-live-r1-27hu729a",
+  "runs": [
+    {
+      "backend": "s3",
+      "exit_code": 0,
+      "elapsed_seconds": 4.743,
+      "prefix": "verification/r1-lost-cas-aae422de3fc04d849daaf54171eebf3f"
+    },
+    {
+      "backend": "minio",
+      "exit_code": 0,
+      "elapsed_seconds": 3.262,
+      "prefix": "verification/r1-lost-cas-1b5676023efd4d4a8e2943a427ffac2c"
+    }
+  ],
+  "test": "live_backend_lost_reply_and_stable_key",
+  "assertions": [
+    "Each exact ref-key after-success DropResponse failpoint fired",
+    "Core retry generation remains 1",
+    "Log retry range remains 1..2 and stores two exact payloads",
+    "Stable retry range remains 1..1 and stores one exact payload"
+  ],
+  "scope": "R1 publication recovery only; not R2 bounded reads, writer sessions, Foundation transport or collection safety",
+  "executed_at": "2026-09-06T10:15:06.283523+00:00"
+}
