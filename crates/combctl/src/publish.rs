@@ -1030,6 +1030,22 @@ impl Store {
                 CoreError::RecoveryFailed("head has generation but no commit".into()).into(),
             );
         }
+        let guard = plan.live_lease();
+        let lease_src = snapshot.value.clone();
+        self.publication_io(
+            &guard,
+            &lease_src,
+            self.commit_at_snapshot_inner(identity, plan, snapshot),
+        )
+        .await
+    }
+
+    async fn commit_at_snapshot_inner<P: RefMutationPlan>(
+        &self,
+        identity: OpIdentity,
+        plan: P,
+        snapshot: HeadSnapshot,
+    ) -> Result<CasResult<P::Outcome>> {
         let now = self.clock().now();
         let generation = snapshot
             .value
@@ -1053,10 +1069,7 @@ impl Store {
             skip,
             now,
         };
-        let guard = plan.live_lease();
-        let prepared = self
-            .publication_io(&guard, &snapshot.value, plan.prepare(ctx))
-            .await?;
+        let prepared = plan.prepare(ctx).await?;
         let mut uploaded: Vec<(Digest, Vec<u8>)> = Vec::new();
         for u in &prepared.uploads {
             let env = Envelope::new(
@@ -1124,17 +1137,14 @@ impl Store {
             uploaded.push((env.meta.digest.clone(), bytes));
         }
         for (digest, bytes) in &uploaded {
-            self.publication_io(&guard, &prepared.next, async {
-                match self
-                    .backend
-                    .put_create(&self.object_key(digest), bytes)
-                    .await
-                {
-                    Ok(_) | Err(CoreError::AlreadyExists(_)) => Ok(()),
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .await?;
+            match self
+                .backend
+                .put_create(&self.object_key(digest), bytes)
+                .await
+            {
+                Ok(_) | Err(CoreError::AlreadyExists(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
             self.cache_write(digest, bytes);
         }
         let commit_digest = if let Some(idx) = prepared.commit_upload {
@@ -1153,26 +1163,15 @@ impl Store {
         enforce_live_lease(&prepared.live_lease, &next, self.clock().now())?;
         next.schema = RefValue::SCHEMA.into();
         let ref_bytes = serde_json::to_vec_pretty(&next)?;
-        let cas = self
-            .publication_io(&guard, &next, async {
-                match self
-                    .backend
-                    .put_update(
-                        &self.ref_key(plan.resource()),
-                        snapshot.version.as_ref(),
-                        &ref_bytes,
-                    )
-                    .await
-                {
-                    Ok(v) => Ok(Ok(v)),
-                    Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
-                        Ok(Err(()))
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .await?;
-        match cas {
+        match self
+            .backend
+            .put_update(
+                &self.ref_key(plan.resource()),
+                snapshot.version.as_ref(),
+                &ref_bytes,
+            )
+            .await
+        {
             Ok(_) => Ok(CasResult::Committed(Published {
                 outcome: prepared.outcome,
                 generation,
@@ -1182,7 +1181,10 @@ impl Store {
                 first_delivery: true,
                 admitted: prepared.admitted,
             })),
-            Err(()) => Ok(CasResult::Conflict),
+            Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
+                Ok(CasResult::Conflict)
+            }
+            Err(e) => Err(e.into()),
         }
     }
 
