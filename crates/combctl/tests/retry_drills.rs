@@ -502,13 +502,24 @@ async fn core_cannot_overwrite_a_log_ref() {
         .unwrap();
     let (digest, _) = store.put_blob(b"x".to_vec()).await.unwrap();
     let err = store
-        .set_target_op(store.mint_operation(), "log/demo/p0", digest, None)
+        .set_target_op(store.mint_operation(), "log/demo/p0", digest.clone(), None)
         .await
         .unwrap_err();
     assert!(matches!(
         err.downcast_ref::<CoreError>(),
         Some(CoreError::Rejected(_))
     ));
+    let err = store
+        .set_target_op(store.mint_operation(), "log/fresh/p0", digest, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::Rejected(_))
+        ),
+        "empty log/ names are reserved, got {err:#}"
+    );
 }
 
 #[tokio::test]
@@ -878,7 +889,7 @@ async fn missing_log_manifest_is_not_permission_to_overwrite() {
     assert!(
         matches!(
             err.downcast_ref::<CoreError>(),
-            Some(CoreError::Rejected(_) | CoreError::RecoveryFailed(_))
+            Some(CoreError::Rejected(_))
         ),
         "{err:#}"
     );

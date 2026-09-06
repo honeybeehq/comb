@@ -173,6 +173,7 @@ impl Store {
         target: Digest,
         fence: Option<u64>,
     ) -> Result<MutationOutcome> {
+        reject_log_namespace(name)?;
         let published = self
             .publish(
                 OpIdentity::Generic(op),
@@ -251,7 +252,17 @@ fn anyhow_digest_mismatch(digest: &Digest) -> anyhow::Error {
     anyhow::anyhow!("backend returned object whose digest does not match {digest}")
 }
 
+fn reject_log_namespace(name: &str) -> Result<()> {
+    if name.starts_with("log/") {
+        return Err(
+            CoreError::Rejected("core set-target cannot write a log-owned ref".into()).into(),
+        );
+    }
+    Ok(())
+}
+
 async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Result<()> {
+    reject_log_namespace(&current.name)?;
     let Some(digest) = current.target.as_ref() else {
         return Ok(());
     };
@@ -301,6 +312,7 @@ impl RefMutationPlan for SetTargetPlan {
     async fn prepare(&self, ctx: PrepareCtx<'_>) -> Result<PreparedMutation<Self::Outcome>> {
         let now = ctx.now;
         let current = &ctx.snapshot.value;
+        reject_log_namespace(&self.name)?;
         reject_existing_log_manifest(ctx.store, current).await?;
         if let Some(f) = self.fence {
             if f != current.epoch {
