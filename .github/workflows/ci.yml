@@ -21,12 +21,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - name: Canonical Foundation key tests
-        run: node --test scripts/foundation-bridge-key.test.mjs
+      - name: Foundation key and acceptance client tests
+        run: node --test scripts/foundation-bridge-key.test.mjs scripts/foundation-bridge-client.test.mjs
       - name: Fixture script syntax
         run: |
           node --check scripts/foundation-bridge-fixture.mjs
           node --check scripts/foundation-bridge-verify.mjs
+          node --check scripts/foundation-bridge-acceptance.mjs
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 45
