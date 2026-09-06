@@ -32,7 +32,7 @@ impl Default for Limits {
             max_follow_timeout_ms: 30_000,
             max_log_name_len: 128,
             max_id_len: 128,
-            max_idempotency_key_len: 256,
+            max_idempotency_key_len: 1024,
             poll_interval_ms: 250,
         }
     }

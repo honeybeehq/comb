@@ -346,11 +346,8 @@ fn parse_append(id: String, value: &Value, limits: &Limits) -> Result<Request, R
     }
     let log = parse_log(id.as_str(), value, limits)?;
     let idempotency_key = match value.get("idempotency_key") {
-        Some(Value::String(s)) => {
-            validate_idempotency_key(s, limits.max_idempotency_key_len)
-                .map_err(|m| Response::invalid(&id, m))?;
-            s.clone()
-        }
+        Some(Value::String(s)) => validate_idempotency_key(s, limits.max_idempotency_key_len)
+            .map_err(|m| Response::invalid(&id, m))?,
         Some(_) => return Err(Response::invalid(&id, "idempotency_key must be a string")),
         None => return Err(Response::invalid(&id, "missing idempotency_key")),
     };
@@ -544,17 +541,33 @@ pub fn validate_id(id: &str, max_len: usize) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_idempotency_key(key: &str, max_len: usize) -> Result<(), String> {
+/// Raw size of an opaque idempotency key. Wire form is lowercase hex, at most
+/// twice this many characters.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 512;
+
+pub fn validate_idempotency_key(key: &str, max_hex_len: usize) -> Result<String, String> {
     if key.is_empty() {
         return Err("idempotency_key is empty".into());
     }
-    if key.len() > max_len {
+    if key.len() % 2 != 0 {
+        return Err("idempotency_key must have even hex length".into());
+    }
+    if key.len() > max_hex_len {
         return Err("idempotency_key exceeds limit".into());
     }
-    if !key.chars().all(|c| c.is_ascii_graphic()) {
-        return Err("idempotency_key must be printable ascii without spaces".into());
+    if !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("idempotency_key must be hexadecimal".into());
     }
-    Ok(())
+    let raw = hex::decode(key).map_err(|e| format!("idempotency_key: {e}"))?;
+    if raw.is_empty() {
+        return Err("idempotency_key is empty".into());
+    }
+    if raw.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(format!(
+            "idempotency_key exceeds {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+        ));
+    }
+    Ok(hex::encode(raw))
 }
 
 pub fn validate_log_name(name: &str, max_len: usize) -> Result<(), String> {

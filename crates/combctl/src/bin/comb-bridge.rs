@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[path = "../bridge/mod.rs"]
 mod bridge;
 
-use bridge::handler::Bridge;
+use bridge::handler::{mint_writer, Bridge};
 use bridge::limits::Limits;
 use bridge::stdio;
 
@@ -26,9 +26,9 @@ struct Cli {
     /// Config directory (default: ./.comb)
     #[arg(long)]
     dir: Option<PathBuf>,
-    /// Writer identity used for Log leases
-    #[arg(long, default_value = "comb-bridge")]
-    writer: String,
+    /// Writer identity used for Log leases. Unique per process when omitted.
+    #[arg(long)]
+    writer: Option<String>,
     /// Lease TTL in seconds for appends
     #[arg(long, default_value_t = 60)]
     lease: i64,
@@ -44,9 +44,11 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    if cli.writer.is_empty() {
-        return Err(anyhow!("--writer must not be empty"));
-    }
+    let writer = match cli.writer {
+        Some(w) if w.is_empty() => return Err(anyhow!("--writer must not be empty")),
+        Some(w) => w,
+        None => mint_writer(),
+    };
     if cli.lease <= 0 {
         return Err(anyhow!("--lease must be positive"));
     }
@@ -84,6 +86,6 @@ async fn run() -> Result<()> {
         key,
         cache_dir,
     };
-    let bridge = Arc::new(Bridge::new(store, cli.writer, cli.lease, Limits::default()));
+    let bridge = Arc::new(Bridge::new(store, writer, cli.lease, Limits::default()));
     stdio::run(tokio::io::stdin(), tokio::io::stdout(), bridge).await
 }

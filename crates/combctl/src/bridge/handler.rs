@@ -2,8 +2,9 @@
 //!
 //! Durable idempotency and bounded-memory reads are not implemented here.
 //! Those belong in Log/Core. This adapter returns `unsupported` until the
-//! shared signatures exist. It does not keep a process-local alias map and
-//! does not call today's unbounded `LogStore::read`.
+//! shared signatures exist. It does not keep a process-local alias map,
+//! does not renew leases (shared Log owns fencing), and does not call
+//! today's unbounded `LogStore::read`.
 
 use super::limits::Limits;
 use super::protocol::{seq_string, Capabilities, OkBody, Request, Response, PROTOCOL_VERSION};
@@ -18,6 +19,12 @@ pub struct Bridge {
     #[allow(dead_code)]
     lease_secs: i64,
     pub limits: Limits,
+}
+
+pub fn mint_writer() -> String {
+    let mut bytes = [0u8; 16];
+    rand::Rng::fill(&mut rand::rng(), &mut bytes);
+    format!("comb-bridge-{}", hex::encode(bytes))
 }
 
 impl Bridge {

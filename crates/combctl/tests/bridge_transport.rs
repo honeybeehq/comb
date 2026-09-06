@@ -68,7 +68,7 @@ async fn stdio_follow_does_not_block_append() {
         &mut client_write,
         json!({
             "v":1,"id":"a","op":"append","log":"doc1",
-            "idempotency_key":"doc:hash","payload_hex":"c0ffee"
+            "idempotency_key":"cafebabe","payload_hex":"c0ffee"
         }),
     )
     .await;
@@ -208,7 +208,7 @@ async fn binary_loads_local_config_without_printing_keys() {
         .unwrap();
     stdin.write_all(b"\n").await.unwrap();
     stdin
-        .write_all(br#"{"v":1,"id":"a","op":"append","log":"doc1","idempotency_key":"k","payload_hex":"cafebabe"}"#)
+        .write_all(br#"{"v":1,"id":"a","op":"append","log":"doc1","idempotency_key":"cafebabe","payload_hex":"cafebabe"}"#)
         .await
         .unwrap();
     stdin.write_all(b"\n").await.unwrap();

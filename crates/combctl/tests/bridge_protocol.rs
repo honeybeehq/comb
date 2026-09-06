@@ -3,7 +3,7 @@
 #[path = "../src/bridge/mod.rs"]
 mod bridge;
 
-use bridge::handler::Bridge;
+use bridge::handler::{mint_writer, Bridge};
 use bridge::limits::Limits;
 use bridge::protocol::{
     extract_id, parse_payload_hex, parse_request, seq_string, ErrorCode, Response,
@@ -72,14 +72,38 @@ fn append_requires_top_level_key_and_single_payload() {
     assert_eq!(err["error"]["code"], "invalid_request");
 
     let err = parse_err(json!({
-        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k",
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"00",
         "events":[{"payload_hex":"00"}]
     }));
     assert_eq!(err["id"], "a");
     assert_eq!(err["error"]["code"], "invalid_request");
 
     parse(json!({
-        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"doc:hash","payload_hex":"00ff"
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"00ff","payload_hex":"00ff"
+    }))
+    .unwrap();
+}
+
+#[test]
+fn idempotency_key_is_opaque_hex_not_ascii() {
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"doc:hash","payload_hex":"00"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k","payload_hex":"00"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let too_long = "aa".repeat(513);
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key": too_long,"payload_hex":"00"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    parse(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"AA","payload_hex":"00"
     }))
     .unwrap();
 }
@@ -87,23 +111,23 @@ fn append_requires_top_level_key_and_single_payload() {
 #[test]
 fn rejects_invalid_hex_empty_payload_and_bad_names() {
     let err = parse_err(json!({
-        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k","payload_hex":"zz"
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"00","payload_hex":"zz"
     }));
     assert_eq!(err["id"], "a");
     assert_eq!(err["error"]["code"], "invalid_request");
 
     let err = parse_err(json!({
-        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k","payload_hex":"abc"
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"00","payload_hex":"abc"
     }));
     assert_eq!(err["error"]["code"], "invalid_request");
 
     let err = parse_err(json!({
-        "v":1,"id":"a","op":"append","log":"../etc","idempotency_key":"k","payload_hex":"00"
+        "v":1,"id":"a","op":"append","log":"../etc","idempotency_key":"00","payload_hex":"00"
     }));
     assert_eq!(err["error"]["code"], "invalid_request");
 
     let err = parse_err(json!({
-        "v":1,"id":"a","op":"append","log":"a/b","idempotency_key":"k","payload_hex":"00"
+        "v":1,"id":"a","op":"append","log":"a/b","idempotency_key":"00","payload_hex":"00"
     }));
     assert_eq!(err["error"]["code"], "invalid_request");
 }
@@ -140,6 +164,15 @@ fn payload_hex_roundtrips_arbitrary_bytes() {
 }
 
 #[test]
+fn mint_writer_is_unique_per_call() {
+    let a = mint_writer();
+    let b = mint_writer();
+    assert_ne!(a, b);
+    assert!(a.starts_with("comb-bridge-"));
+    assert_eq!(a.len(), "comb-bridge-".len() + 32);
+}
+
+#[test]
 fn seq_strings_are_decimal() {
     assert_eq!(seq_string(0), "0");
     assert_eq!(seq_string(1), "1");
@@ -168,6 +201,7 @@ async fn hello_advertises_honest_capabilities() {
     assert_eq!(v["capabilities"]["bounded_memory_read"], false);
     assert_eq!(v["capabilities"]["payload_hex"], true);
     assert_eq!(v["limits"]["max_append_events"], 1);
+    assert_eq!(v["limits"]["max_idempotency_key_len"], 1024);
     assert!(v["limits"]["max_frame_bytes"].as_u64().unwrap() > 0);
     assert!(v["limits"]["max_append_bytes"].as_u64().unwrap() > 0);
 }
@@ -196,7 +230,7 @@ async fn keyed_append_is_unsupported_and_does_not_append() {
             "id":"a",
             "op":"append",
             "log":"doc1",
-            "idempotency_key":"doc:hash",
+            "idempotency_key":"cafebabe",
             "payload_hex":"00ff"
         }),
     )
