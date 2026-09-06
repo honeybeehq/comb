@@ -1,0 +1,28 @@
+{
+  "source_sha": "842ebf1d7620b2aa7397782e31b326d538c22d32",
+  "integration_sha": "bff2edb6f7160b2c12793330f9bf5125b4b8c626",
+  "binary_sha256": "99f89b8073225387512c68e4283bd27ade645b63499f8ff5d9f9d879fb82cbb7",
+  "test_source_sha256": "b476f703ee75461496cbf88a7104f5bfb4ae588a3ba75e0714a9d95802469111",
+  "runs": [
+    {
+      "backend": "local",
+      "exit_code": 0,
+      "seconds": 6.38,
+      "prefix": null
+    },
+    {
+      "backend": "s3",
+      "exit_code": 0,
+      "seconds": 14.974,
+      "prefix": "verification/r2-v3-eight-day-5b813e9baf77412f88509bacee709fa9"
+    },
+    {
+      "backend": "minio",
+      "exit_code": 0,
+      "seconds": 10.829,
+      "prefix": "verification/r2-v3-eight-day-185d77eaf8fc41d29f6be3d10006b5f1"
+    }
+  ],
+  "scope": "Direct v3 CompleteFeed API: asserted final CAS reply loss, exact receipt retry, byte conflict, fresh Store/cache at an injected clock eight days ahead, committed lookup without lease acquisition, count/byte pages and EventTooLarge. Fresh Store in same process; not restart or Foundation transport acceptance.",
+  "test_correction": "Initial probe incorrectly required lost-reply append to succeed internally. Corrected to require typed Unavailable, verify committed head, then explicitly retry the same stable key and bytes."
+}
