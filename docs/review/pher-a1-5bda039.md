@@ -43,3 +43,9 @@ Two original parent tests passed and the new test failed. The test binary hash a
 The isolated daemon rebuilt successfully from `cd1cb26`. Its immutable copy passed the real-process smoke test: 520 historical events, two live events, crash/restart, durable cursor recovery, and increasing sequence numbers. Evidence and the binary hash are in `verification/pher-daemon-smoke-cd1cb26.json`. The build emitted four warnings: an unused connector import, two unused connector fields, and unused test helper methods on SqliteLog. This happy-path result does not cover the failing partial cascade.
 
 `cda1f2b` corrects startup comments and review prose only. The pinned rusqlite default is 5000 ms. The earlier 40-process, 960-path startup result remains applicable; no repeat startup stress was run.
+
+## Disposition at c70770c
+
+The diff adds same-origin timer deduplication and disk assertions. It leaves `process_event`, stream delivery and limit accounting unchanged, so it does not address the remaining two-listener retry failure. This disposition is based on the diff; the executable failure was measured at `cd1cb26`. The consolidated owner task now names that single remaining blocker and marks the startup and original timer issues resolved.
+
+The new test helper `persisted_timer_origin_ids` treats any read error or malformed JSON as an empty list. Make unexpected I/O and decode errors fail the test; otherwise assertions of an empty durable timer list can pass on unreadable or corrupt evidence.
