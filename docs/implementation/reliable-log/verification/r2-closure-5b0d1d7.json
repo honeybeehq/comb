@@ -1,0 +1,229 @@
+{
+  "sha": "5b0d1d71f3754cb63b8f8873907638009e7117ec",
+  "binary_sha256": "3f31c37c16778f458427c63bdd7a09e3029fba79afdc6aa1fa572a1e9db52571",
+  "source_sha256": "e29865091065af2708582c20aa1df80420d94293bd89c9de1550a6f466c5874a",
+  "results": [
+    {
+      "test": "review_acquisition_mutex_wait_honors_deadline",
+      "exit": 0,
+      "seconds": 0.05688012496102601
+    },
+    {
+      "test": "review_append_cannot_publish_after_lease_expires_during_upload",
+      "exit": 101,
+      "seconds": 0.024293916998431087
+    },
+    {
+      "test": "review_cancelled_read_is_cancelled",
+      "exit": 0,
+      "seconds": 0.020988541073165834
+    },
+    {
+      "test": "review_existing_v3_survives_later_v1_ref",
+      "exit": 0,
+      "seconds": 0.027531916042789817
+    },
+    {
+      "test": "review_expired_read_is_deadline_exceeded",
+      "exit": 0,
+      "seconds": 0.021551000070758164
+    },
+    {
+      "test": "review_foreign_manifest_is_not_replayed",
+      "exit": 0,
+      "seconds": 0.027514082961715758
+    },
+    {
+      "test": "review_hung_idle_renewal_loses_by_lease_deadline",
+      "exit": 101,
+      "seconds": 1.4332792499335483
+    },
+    {
+      "test": "review_idle_renewal_cannot_revive_expired_lease",
+      "exit": 0,
+      "seconds": 0.3700572079978883
+    },
+    {
+      "test": "review_manifest_head_cannot_hide_catalog_events",
+      "exit": 0,
+      "seconds": 0.03224466601386666
+    },
+    {
+      "test": "review_max_head_is_integrity_not_overflow",
+      "exit": 0,
+      "seconds": 0.025455875089392066
+    },
+    {
+      "test": "review_missing_committed_target_is_not_empty_feed",
+      "exit": 0,
+      "seconds": 0.02700712508521974
+    },
+    {
+      "test": "review_missing_target_after_release_cannot_reset_key",
+      "exit": 101,
+      "seconds": 0.0328002090100199
+    },
+    {
+      "test": "review_missing_target_after_release_is_not_empty",
+      "exit": 101,
+      "seconds": 0.04356379096861929
+    },
+    {
+      "test": "review_missing_target_cannot_reset_stable_identity",
+      "exit": 0,
+      "seconds": 0.030986875062808394
+    },
+    {
+      "test": "review_old_target_cannot_hide_committed_key",
+      "exit": 101,
+      "seconds": 0.04013041593134403
+    },
+    {
+      "test": "review_read_never_uses_unbounded_get",
+      "exit": 0,
+      "seconds": 0.017639625002630055
+    },
+    {
+      "test": "review_renewal_rechecks_clock_after_delayed_read",
+      "exit": 101,
+      "seconds": 0.16839433391578496
+    },
+    {
+      "test": "review_takeover_preserves_read_before_next_append",
+      "exit": 0,
+      "seconds": 0.030378708033822477
+    },
+    {
+      "test": "review_transient_catalog_read_recovers",
+      "exit": 0,
+      "seconds": 0.04797587497159839
+    },
+    {
+      "test": "review_transient_manifest_read_recovers",
+      "exit": 0,
+      "seconds": 0.059037665952928364
+    },
+    {
+      "test": "review_unacquired_close_completes",
+      "exit": 0,
+      "seconds": 0.022795083932578564
+    }
+  ],
+  "cancellation_repeats": {
+    "sha": "5b0d1d71f3754cb63b8f8873907638009e7117ec",
+    "binary_sha256": "e1c609baec1bba6729f00f3fed268d508ac4ec94940c770b08dfc64a9e922bea",
+    "results": [
+      {
+        "test": "review_acquisition_mutex_wait_honors_deadline",
+        "exit": 0,
+        "seconds": 0.04828149999957532
+      },
+      {
+        "test": "review_cancelled_read_is_cancelled",
+        "exit": 0,
+        "seconds": 0.02018995804246515
+      },
+      {
+        "test": "review_existing_v3_survives_later_v1_ref",
+        "exit": 0,
+        "seconds": 0.02594091696664691
+      },
+      {
+        "test": "review_expired_read_is_deadline_exceeded",
+        "exit": 0,
+        "seconds": 0.018013291992247105
+      },
+      {
+        "test": "review_foreign_manifest_is_not_replayed",
+        "exit": 0,
+        "seconds": 0.0435617920011282
+      },
+      {
+        "test": "review_idle_renewal_cannot_revive_expired_lease",
+        "exit": 0,
+        "seconds": 0.38587541598826647
+      },
+      {
+        "test": "review_manifest_head_cannot_hide_catalog_events",
+        "exit": 0,
+        "seconds": 0.028613333008252084
+      },
+      {
+        "test": "review_max_head_is_integrity_not_overflow",
+        "exit": 0,
+        "seconds": 0.0214286670088768
+      },
+      {
+        "test": "review_missing_committed_target_is_not_empty_feed",
+        "exit": 0,
+        "seconds": 0.026585750048980117
+      },
+      {
+        "test": "review_missing_target_cannot_reset_stable_identity",
+        "exit": 0,
+        "seconds": 0.020091374986805022
+      },
+      {
+        "test": "review_read_never_uses_unbounded_get",
+        "exit": 0,
+        "seconds": 0.0153803750872612
+      },
+      {
+        "test": "review_takeover_preserves_read_before_next_append",
+        "exit": 0,
+        "seconds": 0.029265583027154207
+      },
+      {
+        "test": "review_transient_catalog_read_recovers",
+        "exit": 0,
+        "seconds": 0.054372958024032414
+      },
+      {
+        "test": "review_transient_manifest_read_recovers",
+        "exit": 0,
+        "seconds": 0.04970041592605412
+      },
+      {
+        "test": "review_unacquired_close_completes",
+        "exit": 0,
+        "seconds": 0.01890979101881385
+      },
+      {
+        "test": "review_cancelled_read_is_cancelled",
+        "repeats": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "test": "review_expired_read_is_deadline_exceeded",
+        "repeats": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "method": "git archive fixed SHA; independent private target; copied immutable test executable; each exact test process bounded to 8 seconds",
+  "production_edits": false
+}
