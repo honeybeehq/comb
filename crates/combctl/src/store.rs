@@ -4,7 +4,10 @@ use comb_core::error::CoreError;
 use comb_core::operation::{
     Clock, Material, OpIdentity, OperationId, OperationPolicy, SystemClock,
 };
-use comb_core::{Digest, DigestKey, Envelope, EnvelopeReadSpec, ObjectKind, RefValue};
+use comb_core::{
+    Digest, DigestKey, Envelope, EnvelopeFormatField, EnvelopeReadSpec, ObjectKind, RefValue,
+    MAX_MANIFEST_OBJECT_BYTES,
+};
 use comb_object::{ObjectBackend, Version};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -447,11 +450,33 @@ async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Resu
     let Some(digest) = current.target.as_ref() else {
         return Ok(());
     };
-    let (payload, _) = store.get_blob(digest).await.map_err(|e| {
-        CoreError::Rejected(format!(
-            "core set-target cannot overwrite a ref whose target {digest} cannot be read: {e:#}"
-        ))
-    })?;
+    const LOG_MANIFESTS: &[&str] = &[
+        "comb.log.partition-manifest/v2",
+        "comb.log.partition-manifest/v3",
+    ];
+    let spec = EnvelopeReadSpec {
+        tenant: &store.tenant,
+        kind: ObjectKind::Blob,
+        allowed_schemas: LOG_MANIFESTS,
+        max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+        max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+    };
+    let (payload, _) = match store.get_blob_limited(digest, spec).await {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(CoreError::UnsupportedEnvelopeFormat {
+                field: EnvelopeFormatField::Schema,
+                ..
+            }) = e.downcast_ref()
+            {
+                return Ok(());
+            }
+            return Err(CoreError::Rejected(format!(
+                "core set-target cannot overwrite a ref whose target {digest} cannot be read: {e:#}"
+            ))
+            .into());
+        }
+    };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
         return Ok(());
     };

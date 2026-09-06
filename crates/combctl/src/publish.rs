@@ -3,7 +3,7 @@
 //! Recovery truth is the immutable commit chain linked from the ref. The
 //! per-identity intent is a CAS-guarded attempt record and a result cache.
 
-use crate::store::Store;
+use crate::store::{KeyLayout, Store};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use comb_core::commit::{
@@ -12,10 +12,14 @@ use comb_core::commit::{
 };
 use comb_core::error::CoreError;
 use comb_core::operation::{Material, OpIdentity, OperationPolicy};
-use comb_core::{Digest, Envelope, ObjectKind, RefValue};
+use comb_core::{
+    Digest, Envelope, EnvelopeReadSpec, ObjectKind, RefValue, MAX_MANIFEST_OBJECT_BYTES,
+    MAX_REF_OBJECT_BYTES,
+};
 use comb_object::Version;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::num::NonZeroU64;
 
 pub const NS_V2: &str = "comb/v2";
 pub const NS_V3: &str = "comb/v3";
@@ -169,8 +173,11 @@ impl Store {
     }
 
     pub async fn read_head(&self, name: &str) -> Result<Option<HeadSnapshot>> {
-        self.reject_v1(name).await?;
-        match self.backend.get(&self.ref_key(name)).await {
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(name).await?;
+        }
+        let cap = NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero");
+        match self.backend.get_limited(&self.ref_key(name), cap).await {
             Ok((bytes, version)) => {
                 let value: RefValue = serde_json::from_slice(&bytes)
                     .map_err(|e| CoreError::InvalidFormat(format!("ref {name}: {e}")))?;
@@ -211,7 +218,9 @@ impl Store {
         identity: OpIdentity,
         plan: P,
     ) -> Result<Published<P::Outcome>> {
-        self.reject_v1(plan.resource()).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(plan.resource()).await?;
+        }
         let request = plan
             .material()
             .hash(&self.key, &self.tenant, plan.resource());
@@ -911,7 +920,9 @@ impl Store {
         plan: P,
         snapshot: HeadSnapshot,
     ) -> Result<CasResult<P::Outcome>> {
-        self.reject_v1(plan.resource()).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(plan.resource()).await?;
+        }
         if snapshot.value.generation > 0 && snapshot.value.head_commit.is_none() {
             return Err(
                 CoreError::RecoveryFailed("head has generation but no commit".into()).into(),
@@ -950,7 +961,17 @@ impl Store {
                 u.payload.clone(),
                 &self.key,
             );
-            uploaded.push((env.meta.digest.clone(), env.encode()?));
+            let bytes = env.encode()?;
+            let cap = encoded_upload_cap(&u.schema);
+            if bytes.len() as u64 > cap {
+                return Err(CoreError::ObjectTooLarge {
+                    key: self.object_key(&env.meta.digest),
+                    limit: cap,
+                    actual: Some(bytes.len() as u64),
+                }
+                .into());
+            }
+            uploaded.push((env.meta.digest.clone(), bytes));
         }
         if prepared.commit_upload.is_none() {
             let header = CommitHeader {
@@ -985,7 +1006,17 @@ impl Store {
                 serde_json::to_vec(&commit)?,
                 &self.key,
             );
-            uploaded.push((env.meta.digest.clone(), env.encode()?));
+            let bytes = env.encode()?;
+            let cap = encoded_upload_cap(COMMIT_SCHEMA);
+            if bytes.len() as u64 > cap {
+                return Err(CoreError::ObjectTooLarge {
+                    key: self.object_key(&env.meta.digest),
+                    limit: cap,
+                    actual: Some(bytes.len() as u64),
+                }
+                .into());
+            }
+            uploaded.push((env.meta.digest.clone(), bytes));
         }
         for (digest, bytes) in &uploaded {
             match self
@@ -1142,10 +1173,23 @@ impl Store {
     }
 
     pub(crate) async fn load_commit_view(&self, digest: &Digest) -> Result<CommitView> {
+        const CARRIERS: &[&str] = &[
+            COMMIT_SCHEMA,
+            LOG_MANIFEST_SCHEMA,
+            LOG_MANIFEST_SCHEMA_V3,
+            "comb.object/v1",
+        ];
+        let spec = EnvelopeReadSpec {
+            tenant: &self.tenant,
+            kind: ObjectKind::Blob,
+            allowed_schemas: CARRIERS,
+            max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+            max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+        };
         let (payload, _) = self
-            .get_blob(digest)
+            .get_blob_limited(digest, spec)
             .await
-            .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} unreadable: {e:#}")))?;
+            .map_err(|e| map_commit_read_error(digest, e))?;
         let value: serde_json::Value = serde_json::from_slice(&payload)
             .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} is not JSON: {e}")))?;
         let schema = value
@@ -1177,22 +1221,44 @@ impl Store {
         let header: CommitHeader = serde_json::from_value(header_v)
             .map_err(|e| CoreError::RecoveryFailed(format!("header in {digest}: {e}")))?;
         header.validate()?;
-        let admitted = match value.get("admitted") {
-            Some(v) => serde_json::from_value(v.clone())
-                .map_err(|e| CoreError::RecoveryFailed(format!("admitted in {digest}: {e}")))?,
-            None => Vec::new(),
-        };
-        let result = value
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let ref_state = match value.get("ref_state") {
-            Some(v) if !v.is_null() => {
-                Some(serde_json::from_value(v.clone()).map_err(|e| {
-                    CoreError::RecoveryFailed(format!("ref_state in {digest}: {e}"))
+        let (admitted, result, ref_state) = if schema == LOG_MANIFEST_SCHEMA_V3 {
+            require_v3_field(&value, digest, "log")?;
+            require_v3_field(&value, digest, "stable_admissions")?;
+            let admitted_v = require_v3_field(&value, digest, "admitted")?;
+            let result_v = require_v3_field(&value, digest, "result")?;
+            let ref_state_v = require_v3_field(&value, digest, "ref_state")?;
+            let admitted = serde_json::from_value(admitted_v.clone())
+                .map_err(|e| CoreError::IntegrityError(format!("admitted in v3 {digest}: {e}")))?;
+            let ref_state = if ref_state_v.is_null() {
+                return Err(CoreError::IntegrityError(format!(
+                    "v3 manifest {digest} is missing ref_state"
+                ))
+                .into());
+            } else {
+                Some(serde_json::from_value(ref_state_v.clone()).map_err(|e| {
+                    CoreError::IntegrityError(format!("ref_state in v3 {digest}: {e}"))
                 })?)
-            }
-            _ => None,
+            };
+            (admitted, result_v.clone(), ref_state)
+        } else {
+            let admitted = match value.get("admitted") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| CoreError::RecoveryFailed(format!("admitted in {digest}: {e}")))?,
+                None => Vec::new(),
+            };
+            let result = value
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let ref_state = match value.get("ref_state") {
+                Some(v) if !v.is_null() => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| {
+                        CoreError::RecoveryFailed(format!("ref_state in {digest}: {e}"))
+                    })?)
+                }
+                _ => None,
+            };
+            (admitted, result, ref_state)
         };
         Ok(CommitView {
             digest: digest.clone(),
@@ -1240,7 +1306,9 @@ impl Store {
 
     /// Lease renewal: fresh snapshot, no generation bump, no new commit.
     pub async fn renew_lease(&self, name: &str, fence: u64, ttl_secs: i64) -> Result<RefValue> {
-        self.reject_v1(name).await?;
+        if self.layout == KeyLayout::V2 {
+            self.reject_v1(name).await?;
+        }
         for _ in 0..16 {
             let now = self.clock().now();
             let snapshot = self
@@ -1468,6 +1536,48 @@ fn intent_expiry(identity: &OpIdentity, policy: &OperationPolicy) -> Option<Date
     match identity {
         OpIdentity::Generic(op) => Some(op.expires_at(policy)),
         OpIdentity::Stable(_) => None,
+    }
+}
+
+const MAX_CHUNK_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
+
+fn encoded_upload_cap(schema: &str) -> u64 {
+    if schema == LOG_MANIFEST_SCHEMA
+        || schema == LOG_MANIFEST_SCHEMA_V3
+        || schema == COMMIT_SCHEMA
+        || schema == HEADER_SCHEMA
+    {
+        MAX_MANIFEST_OBJECT_BYTES
+    } else {
+        MAX_CHUNK_OBJECT_BYTES
+    }
+}
+
+fn require_v3_field<'a>(
+    value: &'a serde_json::Value,
+    digest: &Digest,
+    field: &str,
+) -> Result<&'a serde_json::Value> {
+    value.get(field).ok_or_else(|| {
+        CoreError::IntegrityError(format!("v3 manifest {digest} is missing {field}")).into()
+    })
+}
+
+fn map_commit_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<CoreError>() {
+        Ok(CoreError::BackendUnavailable(m)) => {
+            CoreError::BackendUnavailable(format!("commit {digest}: {m}")).into()
+        }
+        Ok(CoreError::Io(io)) => {
+            CoreError::BackendUnavailable(format!("commit {digest}: {io}")).into()
+        }
+        Ok(CoreError::NotFound(_)) => {
+            CoreError::IntegrityError(format!("commit {digest} is missing")).into()
+        }
+        Ok(other) => {
+            CoreError::RecoveryFailed(format!("commit {digest} unreadable: {other}")).into()
+        }
+        Err(e) => CoreError::RecoveryFailed(format!("commit {digest} unreadable: {e:#}")).into(),
     }
 }
 
@@ -1699,5 +1809,67 @@ mod tests {
         assert_eq!(published.value.target, Some(target));
         assert_eq!(published.value.head_commit, Some(view.digest));
         assert_ne!(published.value.lease, None);
+    }
+
+    #[tokio::test]
+    async fn v3_manifest_missing_recovery_fields_is_integrity() {
+        let store = store().with_layout(KeyLayout::V3);
+        let op = store.mint_operation();
+        let header = CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "log/foo/p0".into(),
+            generation: 1,
+            epoch: 1,
+            identity: op.to_string(),
+            request: store.key.digest(b"req"),
+            parent: None,
+            skip: None,
+            at: chrono::Utc::now(),
+        };
+        header.validate().unwrap();
+        let mut missing_ref = serde_json::json!({
+            "schema": LOG_MANIFEST_SCHEMA_V3,
+            "header": header,
+            "log": "log/foo/p0",
+            "epoch": 1,
+            "head_seq": 0,
+            "admitted": [],
+            "stable_admissions": [],
+            "result": null
+        });
+        let (d1, _) = store
+            .put_blob(serde_json::to_vec(&missing_ref).unwrap())
+            .await
+            .unwrap();
+        let err = store.load_commit_view(&d1).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(m)) if m.contains("ref_state")
+            ),
+            "{err:#}"
+        );
+
+        missing_ref["ref_state"] = serde_json::json!({
+            "schema": RefValue::SCHEMA,
+            "tenant": "org_t",
+            "name": "log/foo/p0",
+            "generation": 1,
+            "epoch": 1,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        });
+        missing_ref.as_object_mut().unwrap().remove("admitted");
+        let (d2, _) = store
+            .put_blob(serde_json::to_vec(&missing_ref).unwrap())
+            .await
+            .unwrap();
+        let err = store.load_commit_view(&d2).await.unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(m)) if m.contains("admitted")
+            ),
+            "{err:#}"
+        );
     }
 }

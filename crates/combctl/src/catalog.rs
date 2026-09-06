@@ -3,7 +3,7 @@
 use crate::store::Store;
 use anyhow::Result;
 use comb_core::error::CoreError;
-use comb_core::{Digest, Envelope, EnvelopeReadSpec, ObjectKind};
+use comb_core::{Digest, EnvelopeReadSpec, ObjectKind};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -252,45 +252,101 @@ pub async fn append(
             })
         }
         CatalogState::Root { root } => {
-            if chunk.first_seq != root.last_seq + 1 {
+            let expected = root
+                .last_seq
+                .checked_add(1)
+                .ok_or_else(|| CoreError::IntegrityError("catalog sequence overflow".into()))?;
+            if chunk.first_seq != expected {
                 return Err(CoreError::IntegrityError(format!(
                     "catalog append {} is not contiguous after {}",
                     chunk.first_seq, root.last_seq
                 ))
                 .into());
             }
-            let (digest, _height, _split) =
-                append_at(store, &root.digest, root.height, chunk).await?;
-            let node = load_node(store, &digest).await?;
-            let root = match node {
-                CatalogNode::Leaf { refs, .. } => {
-                    let (first_seq, last_seq, chunk_count) = leaf_span(&refs);
-                    ChunkCatalogRoot {
-                        schema: CatalogSchemaV1::V1,
-                        digest,
-                        height: 0,
-                        first_seq,
-                        last_seq,
-                        chunk_count,
-                    }
+            match append_at(store, &root.digest, root.height, chunk).await? {
+                SpineUpdate::Grown { digest, .. } => {
+                    let node = load_node(store, &digest).await?;
+                    Ok(CatalogState::Root {
+                        root: root_from_node(digest, node)?,
+                    })
                 }
-                CatalogNode::Branch {
-                    height, children, ..
+                SpineUpdate::Split {
+                    left,
+                    right,
+                    height,
                 } => {
-                    let (first_seq, last_seq, chunk_count) = child_span(&children);
-                    ChunkCatalogRoot {
-                        schema: CatalogSchemaV1::V1,
-                        digest,
-                        height,
-                        first_seq,
-                        last_seq,
-                        chunk_count,
+                    let new_height = height
+                        .checked_add(1)
+                        .ok_or_else(|| CoreError::Rejected("catalog height exceeded".into()))?;
+                    if new_height > MAX_CATALOG_HEIGHT {
+                        return Err(CoreError::Rejected("catalog height exceeded".into()).into());
                     }
+                    let children = vec![left, right];
+                    let (first_seq, last_seq, chunk_count) = child_span(&children);
+                    let digest = put_node(
+                        store,
+                        &CatalogNode::Branch {
+                            schema: CatalogSchemaV1::V1,
+                            height: new_height,
+                            children,
+                        },
+                    )
+                    .await?;
+                    Ok(CatalogState::Root {
+                        root: ChunkCatalogRoot {
+                            schema: CatalogSchemaV1::V1,
+                            digest,
+                            height: new_height,
+                            first_seq,
+                            last_seq,
+                            chunk_count,
+                        },
+                    })
                 }
-            };
-            Ok(CatalogState::Root { root })
+            }
         }
     }
+}
+
+enum SpineUpdate {
+    Grown {
+        digest: Digest,
+        height: u8, // kept for parent-child checks at the call site
+    },
+    Split {
+        left: CatalogChild,
+        right: CatalogChild,
+        height: u8,
+    },
+}
+
+fn root_from_node(digest: Digest, node: CatalogNode) -> Result<ChunkCatalogRoot> {
+    Ok(match node {
+        CatalogNode::Leaf { refs, .. } => {
+            let (first_seq, last_seq, chunk_count) = leaf_span(&refs);
+            ChunkCatalogRoot {
+                schema: CatalogSchemaV1::V1,
+                digest,
+                height: 0,
+                first_seq,
+                last_seq,
+                chunk_count,
+            }
+        }
+        CatalogNode::Branch {
+            height, children, ..
+        } => {
+            let (first_seq, last_seq, chunk_count) = child_span(&children);
+            ChunkCatalogRoot {
+                schema: CatalogSchemaV1::V1,
+                digest,
+                height,
+                first_seq,
+                last_seq,
+                chunk_count,
+            }
+        }
+    })
 }
 
 async fn append_at(
@@ -298,10 +354,16 @@ async fn append_at(
     digest: &Digest,
     height: u8,
     chunk: CatalogChunkRef,
-) -> Result<(Digest, u8, bool)> {
+) -> Result<SpineUpdate> {
     let node = load_node(store, digest).await?;
     match node {
         CatalogNode::Leaf { mut refs, .. } => {
+            if height != 0 {
+                return Err(CoreError::IntegrityError(
+                    "catalog leaf reached at nonzero height".into(),
+                )
+                .into());
+            }
             if refs.len() < MAX_CATALOG_ITEMS {
                 refs.push(chunk);
                 let digest = put_node(
@@ -312,133 +374,90 @@ async fn append_at(
                     },
                 )
                 .await?;
-                Ok((digest, 0, false))
-            } else {
-                let right = CatalogNode::Leaf {
-                    schema: CatalogSchemaV1::V1,
-                    refs: vec![chunk],
-                };
-                let right_digest = put_node(store, &right).await?;
-                let left_child = child_from_leaf(digest.clone(), &refs);
-                let CatalogNode::Leaf {
-                    refs: right_refs, ..
-                } = &right
-                else {
-                    unreachable!();
-                };
-                let right_child = child_from_leaf(right_digest, right_refs);
-                if height != 0 {
-                    // caller rebuilds parent
-                }
-                let branch = CatalogNode::Branch {
-                    schema: CatalogSchemaV1::V1,
-                    height: 1,
-                    children: vec![left_child, right_child],
-                };
-                let new_root = put_node(store, &branch).await?;
-                Ok((new_root, 1, true))
+                return Ok(SpineUpdate::Grown { digest, height: 0 });
             }
+            let right_refs = vec![chunk];
+            let right_digest = put_node(
+                store,
+                &CatalogNode::Leaf {
+                    schema: CatalogSchemaV1::V1,
+                    refs: right_refs.clone(),
+                },
+            )
+            .await?;
+            Ok(SpineUpdate::Split {
+                left: child_from_leaf(digest.clone(), &refs),
+                right: child_from_leaf(right_digest, &right_refs),
+                height: 0,
+            })
         }
         CatalogNode::Branch {
             height: h,
             mut children,
             ..
         } => {
+            if h != height {
+                return Err(CoreError::IntegrityError(format!(
+                    "catalog branch height {h} disagrees with parent {height}"
+                ))
+                .into());
+            }
             let last = children.last().expect("branch nonempty").clone();
-            let (child_digest, child_height, child_split) =
-                Box::pin(append_at(store, &last.digest, h - 1, chunk)).await?;
-            if !child_split {
-                let child_node = load_node(store, &child_digest).await?;
-                let updated = match child_node {
-                    CatalogNode::Leaf { refs, .. } => child_from_leaf(child_digest, &refs),
-                    CatalogNode::Branch { children, .. } => {
-                        child_from_branch(child_digest, &children)
+            let child_update = Box::pin(append_at(store, &last.digest, h - 1, chunk)).await?;
+            match child_update {
+                SpineUpdate::Grown {
+                    digest: child_digest,
+                    height: grown_h,
+                } => {
+                    if grown_h + 1 != h {
+                        return Err(CoreError::IntegrityError(
+                            "catalog grown child height is not parent minus one".into(),
+                        )
+                        .into());
                     }
-                };
-                *children.last_mut().unwrap() = updated;
-                let digest = put_node(
-                    store,
-                    &CatalogNode::Branch {
-                        schema: CatalogSchemaV1::V1,
-                        height: h,
-                        children,
-                    },
-                )
-                .await?;
-                Ok((digest, h, false))
-            } else {
-                // child split produced a new node; append_at on a full leaf
-                // currently returns a new branch. For internal levels we need
-                // the right sibling only. Handle leaf-split specially:
-                let split_node = load_node(store, &child_digest).await?;
-                match split_node {
-                    CatalogNode::Branch {
-                        children: split_children,
-                        height: sh,
-                        ..
-                    } if child_height == 1 && h == 1 && sh == 1 && split_children.len() == 2 => {
-                        // Leaf split bubbled as a 2-child branch. If we are the
-                        // root of height 1, that branch IS the new root when
-                        // we only had one... actually we already had children.
-                        // Replace last child with split_children[0] and push [1].
-                        children.pop();
-                        children.extend(split_children);
-                        if children.len() <= MAX_CATALOG_ITEMS {
-                            let digest = put_node(
-                                store,
-                                &CatalogNode::Branch {
-                                    schema: CatalogSchemaV1::V1,
-                                    height: h,
-                                    children,
-                                },
-                            )
-                            .await?;
-                            Ok((digest, h, false))
-                        } else {
-                            let right: Vec<CatalogChild> = children.split_off(MAX_CATALOG_ITEMS);
-                            let left_digest = put_node(
-                                store,
-                                &CatalogNode::Branch {
-                                    schema: CatalogSchemaV1::V1,
-                                    height: h,
-                                    children: children.clone(),
-                                },
-                            )
-                            .await?;
-                            let right_digest = put_node(
-                                store,
-                                &CatalogNode::Branch {
-                                    schema: CatalogSchemaV1::V1,
-                                    height: h,
-                                    children: right.clone(),
-                                },
-                            )
-                            .await?;
-                            let branch = CatalogNode::Branch {
-                                schema: CatalogSchemaV1::V1,
-                                height: h + 1,
-                                children: vec![
-                                    child_from_branch(left_digest, &children),
-                                    child_from_branch(right_digest, &right),
-                                ],
-                            };
-                            if h + 1 > MAX_CATALOG_HEIGHT {
-                                return Err(
-                                    CoreError::Rejected("catalog height exceeded".into()).into()
-                                );
+                    let child_node = load_node(store, &child_digest).await?;
+                    *children.last_mut().unwrap() = match child_node {
+                        CatalogNode::Leaf { refs, .. } => child_from_leaf(child_digest, &refs),
+                        CatalogNode::Branch {
+                            children: ch,
+                            height: ch_h,
+                            ..
+                        } => {
+                            if ch_h + 1 != h {
+                                return Err(CoreError::IntegrityError(
+                                    "catalog child height is not parent minus one".into(),
+                                )
+                                .into());
                             }
-                            let digest = put_node(store, &branch).await?;
-                            Ok((digest, h + 1, true))
+                            child_from_branch(child_digest, &ch)
                         }
+                    };
+                    let digest = put_node(
+                        store,
+                        &CatalogNode::Branch {
+                            schema: CatalogSchemaV1::V1,
+                            height: h,
+                            children,
+                        },
+                    )
+                    .await?;
+                    Ok(SpineUpdate::Grown { digest, height: h })
+                }
+                SpineUpdate::Split {
+                    left,
+                    right,
+                    height: sh,
+                } => {
+                    if sh + 1 != h {
+                        return Err(CoreError::IntegrityError(
+                            "catalog split height is not parent minus one".into(),
+                        )
+                        .into());
                     }
-                    other => {
-                        let updated = match other {
-                            CatalogNode::Leaf { refs, .. } => child_from_leaf(child_digest, &refs),
-                            CatalogNode::Branch { children: ch, .. } => {
-                                child_from_branch(child_digest, &ch)
-                            }
-                        };
-                        *children.last_mut().unwrap() = updated;
+                    children.pop();
+                    children.push(left);
+                    children.push(right);
+                    if children.len() <= MAX_CATALOG_ITEMS {
                         let digest = put_node(
                             store,
                             &CatalogNode::Branch {
@@ -448,8 +467,35 @@ async fn append_at(
                             },
                         )
                         .await?;
-                        Ok((digest, h, false))
+                        return Ok(SpineUpdate::Grown { digest, height: h });
                     }
+                    if h >= MAX_CATALOG_HEIGHT {
+                        return Err(CoreError::Rejected("catalog height exceeded".into()).into());
+                    }
+                    let right_children: Vec<CatalogChild> = children.split_off(MAX_CATALOG_ITEMS);
+                    let left_digest = put_node(
+                        store,
+                        &CatalogNode::Branch {
+                            schema: CatalogSchemaV1::V1,
+                            height: h,
+                            children: children.clone(),
+                        },
+                    )
+                    .await?;
+                    let right_digest = put_node(
+                        store,
+                        &CatalogNode::Branch {
+                            schema: CatalogSchemaV1::V1,
+                            height: h,
+                            children: right_children.clone(),
+                        },
+                    )
+                    .await?;
+                    Ok(SpineUpdate::Split {
+                        left: child_from_branch(left_digest, &children),
+                        right: child_from_branch(right_digest, &right_children),
+                        height: h,
+                    })
                 }
             }
         }
@@ -468,9 +514,27 @@ pub async fn seek_leaf(
         return Ok(None);
     }
     let mut digest = root.digest.clone();
+    let mut depth = 0u8;
     loop {
+        if depth > MAX_CATALOG_HEIGHT {
+            return Err(
+                CoreError::IntegrityError("catalog seek exceeded height bound".into()).into(),
+            );
+        }
         match load_node(store, &digest).await? {
-            CatalogNode::Leaf { refs, .. } => return Ok(Some(refs)),
+            CatalogNode::Leaf { refs, .. } => {
+                let first = refs.first().map(|r| r.first_seq);
+                let last = refs.last().map(|r| r.last_seq);
+                match (first, last) {
+                    (Some(f), Some(l)) if f <= seq && seq <= l => return Ok(Some(refs)),
+                    _ => {
+                        return Err(CoreError::IntegrityError(
+                            "catalog leaf does not cover the seek".into(),
+                        )
+                        .into())
+                    }
+                }
+            }
             CatalogNode::Branch { children, .. } => {
                 let Some(child) = children
                     .iter()
@@ -482,35 +546,32 @@ pub async fn seek_leaf(
                     .into());
                 };
                 digest = child.digest.clone();
+                depth = depth.saturating_add(1);
             }
         }
     }
 }
 
-pub async fn encoded_node_bytes(store: &Store, digest: &Digest) -> Result<u64> {
-    let (payload, _) = store.get_blob_limited(digest, spec(&store.tenant)).await?;
-    let env = Envelope::new(
-        &store.tenant,
-        ObjectKind::Blob,
-        CATALOG_NODE_SCHEMA,
-        payload,
-        &store.key,
-    );
-    Ok(env.encode()?.len() as u64)
-}
-
+#[allow(dead_code)]
 pub async fn walk_right_spine_digests(store: &Store, state: &CatalogState) -> Result<Vec<Digest>> {
     let CatalogState::Root { root } = state else {
         return Ok(Vec::new());
     };
     let mut out = vec![root.digest.clone()];
     let mut digest = root.digest.clone();
+    let mut depth = 0u8;
     loop {
+        if depth > MAX_CATALOG_HEIGHT {
+            return Err(
+                CoreError::IntegrityError("catalog spine exceeded height bound".into()).into(),
+            );
+        }
         match load_node(store, &digest).await? {
             CatalogNode::Leaf { .. } => return Ok(out),
             CatalogNode::Branch { children, .. } => {
                 digest = children.last().unwrap().digest.clone();
                 out.push(digest.clone());
+                depth = depth.saturating_add(1);
             }
         }
     }
@@ -563,11 +624,7 @@ mod tests {
             let leaf = seek_leaf(&store, &state, seq).await.unwrap().unwrap();
             assert!(leaf.iter().any(|r| r.first_seq <= seq && seq <= r.last_seq));
         }
-        for digest in walk_right_spine_digests(&store, &state).await.unwrap() {
-            assert!(
-                encoded_node_bytes(&store, &digest).await.unwrap() <= MAX_CATALOG_NODE_OBJECT_BYTES
-            );
-        }
+        assert_height_invariant(&store, &state).await;
     }
 
     #[tokio::test]
@@ -589,10 +646,161 @@ mod tests {
         );
         let leaf = seek_leaf(&store, &state, 1025).await.unwrap().unwrap();
         assert_eq!(leaf.last().unwrap().last_seq, 1025);
-        for digest in walk_right_spine_digests(&store, &state).await.unwrap() {
-            assert!(
-                encoded_node_bytes(&store, &digest).await.unwrap() <= MAX_CATALOG_NODE_OBJECT_BYTES
-            );
+        assert_height_invariant(&store, &state).await;
+    }
+
+    #[tokio::test]
+    async fn twenty_one_hundred_chunks_keep_parent_child_height() {
+        let store = store();
+        let d = store.key.digest(b"chunk");
+        let mut state = CatalogState::Empty;
+        for seq in 1..=2100u64 {
+            state = append(&store, &state, tiny(seq, &d)).await.unwrap();
+        }
+        let CatalogState::Root { root } = &state else {
+            panic!("expected root");
+        };
+        assert_eq!(root.chunk_count, 2100);
+        assert_eq!(root.first_seq, 1);
+        assert_eq!(root.last_seq, 2100);
+        assert_height_invariant(&store, &state).await;
+        for seq in [1, 32, 1024, 1025, 2048, 2050, 2100] {
+            let leaf = seek_leaf(&store, &state, seq).await.unwrap().unwrap();
+            assert!(leaf.first().unwrap().first_seq <= seq && seq <= leaf.last().unwrap().last_seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn seek_leaf_rejects_child_last_seq_off_by_one() {
+        let store = store();
+        let d = store.key.digest(b"chunk");
+        let leaf = CatalogNode::Leaf {
+            schema: CatalogSchemaV1::V1,
+            refs: vec![tiny(1, &d)],
+        };
+        let leaf_digest = put_node(&store, &leaf).await.unwrap();
+        let branch = CatalogNode::Branch {
+            schema: CatalogSchemaV1::V1,
+            height: 1,
+            children: vec![CatalogChild {
+                first_seq: 1,
+                last_seq: 2,
+                chunk_count: 1,
+                digest: leaf_digest,
+            }],
+        };
+        let root_digest = put_node(&store, &branch).await.unwrap();
+        let state = CatalogState::Root {
+            root: ChunkCatalogRoot {
+                schema: CatalogSchemaV1::V1,
+                digest: root_digest,
+                height: 1,
+                first_seq: 1,
+                last_seq: 2,
+                chunk_count: 1,
+            },
+        };
+        let err = seek_leaf(&store, &state, 2).await.unwrap_err();
+        match err.downcast_ref::<CoreError>() {
+            Some(CoreError::IntegrityError(m)) => {
+                assert!(m.contains("does not cover"), "{m}");
+            }
+            other => panic!("expected IntegrityError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn seek_leaf_rejects_unbounded_spine() {
+        let store = store();
+        let d = store.key.digest(b"chunk");
+        let mut child = put_node(
+            &store,
+            &CatalogNode::Leaf {
+                schema: CatalogSchemaV1::V1,
+                refs: vec![tiny(1, &d)],
+            },
+        )
+        .await
+        .unwrap();
+        let mut height = 0u8;
+        for h in 1..=MAX_CATALOG_HEIGHT + 2 {
+            child = put_node(
+                &store,
+                &CatalogNode::Branch {
+                    schema: CatalogSchemaV1::V1,
+                    height: h.min(MAX_CATALOG_HEIGHT),
+                    children: vec![CatalogChild {
+                        first_seq: 1,
+                        last_seq: 1,
+                        chunk_count: 1,
+                        digest: child,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+            height = h.min(MAX_CATALOG_HEIGHT);
+        }
+        let state = CatalogState::Root {
+            root: ChunkCatalogRoot {
+                schema: CatalogSchemaV1::V1,
+                digest: child,
+                height,
+                first_seq: 1,
+                last_seq: 1,
+                chunk_count: 1,
+            },
+        };
+        let err = seek_leaf(&store, &state, 1).await.unwrap_err();
+        match err.downcast_ref::<CoreError>() {
+            Some(CoreError::IntegrityError(m)) => {
+                assert!(m.contains("height bound"), "{m}");
+            }
+            other => panic!("expected height-bound IntegrityError, got {other:?}"),
+        }
+    }
+
+    async fn assert_height_invariant(store: &Store, state: &CatalogState) {
+        let CatalogState::Root { root } = state else {
+            panic!("expected root");
+        };
+        let mut digest = root.digest.clone();
+        let mut expected_height = root.height;
+        let mut depth = 0u8;
+        loop {
+            match load_node(store, &digest).await.unwrap() {
+                CatalogNode::Leaf { .. } => {
+                    assert_eq!(
+                        expected_height, 0,
+                        "leaf at claimed height {expected_height}"
+                    );
+                    assert_eq!(depth, root.height, "root.height must equal descent depth");
+                    return;
+                }
+                CatalogNode::Branch {
+                    height, children, ..
+                } => {
+                    assert_eq!(height, expected_height);
+                    for child in &children {
+                        match load_node(store, &child.digest).await.unwrap() {
+                            CatalogNode::Leaf { .. } => {
+                                assert_eq!(height, 1, "leaf child under height {height}");
+                            }
+                            CatalogNode::Branch { height: ch, .. } => {
+                                assert_eq!(
+                                    ch,
+                                    height - 1,
+                                    "child height {ch} must be parent {height} minus one"
+                                );
+                            }
+                        }
+                    }
+                    digest = children[0].digest.clone();
+                    expected_height = height - 1;
+                    depth += 1;
+                    assert!(depth <= MAX_CATALOG_HEIGHT);
+                }
+            }
         }
     }
 }
