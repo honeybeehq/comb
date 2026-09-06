@@ -202,6 +202,24 @@ Every invocation requires a new output directory; an existing directory is refus
 before starting the bridge. A failed run cannot leave a prior receipt looking current.
 The client retains terminal errors even when no request is pending.
 
+Successful append calls explicitly retry only typed `backend_unavailable` responses.
+Each logical append keeps the exact original log, key hex, and payload hex. Transient
+request IDs change between attempts. The caller allows at most six attempts within
+one 60-second overall deadline, including requests and backoff. Backoff starts at
+100 ms, doubles, and is capped at 2 seconds. Each request receives only the remaining
+deadline budget. The bridge process is not restarted or reacquired by this retry loop.
+Conflicts, cancellation, deadline errors, session loss, malformed protocol output,
+and transport failures end the run. Exhaustion also fails, since an unavailable
+append might already have committed.
+
+`receipt.json` includes `append_retry_policy` and `append_attempts`, so a recovery
+cannot be mistaken for a first-attempt success. `append-attempts.json` is written
+before a success receipt or during failure cleanup. It records each response outcome,
+request ID, elapsed time, scheduled backoff, log, and SHA256 fingerprints of the exact
+key and payload hex strings. Failed runs retain this evidence without a success
+receipt. Remaining concurrent append loops are cancelled and settled before failure
+cleanup finishes. The earlier failed S3 run remains a separate artifact.
+
 Run `node --test scripts/foundation-bridge-client.test.mjs` for deterministic client
 lifecycle checks, including late invalid output and stale receipt refusal. These
 checks simulate process I/O only and provide no storage acceptance evidence.

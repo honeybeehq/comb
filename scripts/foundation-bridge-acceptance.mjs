@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Bridge, reserveOutputDirectory, writeSuccessfulCapture } from './foundation-bridge-client.mjs';
+import { APPEND_RETRY_POLICY, appendWithRetry, Bridge, reserveOutputDirectory, writeSuccessfulCapture } from './foundation-bridge-client.mjs';
 
 if (![5, 6].includes(process.argv.length)) {
   throw new Error('usage: node foundation-bridge-acceptance.mjs <comb-bridge> <config-dir> <output-dir> [forward|reverse]');
@@ -28,9 +28,28 @@ const receipt = {
   foundation_commit: fixture.foundation_commit,
   binary_sha256: binaryHash.digest('hex'),
   checks: [],
+  append_retry_policy: APPEND_RETRY_POLICY,
+  append_attempts: [],
 };
 const recoveryConfig = await mkdtemp(join(tmpdir(), 'comb-bridge-recovery-'));
 let bridge = new Bridge(binary, configDir);
+const appendCancellation = new AbortController();
+const appendCalls = [];
+let attemptEvidenceWritten = false;
+async function writeAttemptEvidence() {
+  await writeFile(join(outputDir, 'append-attempts.json'), JSON.stringify({
+    policy: APPEND_RETRY_POLICY, attempts: receipt.append_attempts,
+  }, null, 2) + '\n', { flag: 'wx' });
+  attemptEvidenceWritten = true;
+}
+const append = (fields, client) => {
+  const call = appendWithRetry(bridge, fields, client, {
+    signal: appendCancellation.signal,
+    onAttempt: attempt => receipt.append_attempts.push(attempt),
+  });
+  appendCalls.push(call);
+  return call;
+};
 try {
   const hello = await bridge.ok('hello');
   receipt.hello = hello;
@@ -43,7 +62,7 @@ try {
   const initialHead = await bridge.ok('head', { log });
   assert.equal(initialHead.head, '0');
   const following = bridge.ok('follow', { log, cursor: '1', max_events: 1, max_bytes: 16_384, timeout_ms: 30_000 }, 'reader');
-  const appends = changes.map((change, index) => bridge.ok('append', {
+  const appends = changes.map((change, index) => append({
     log, idempotency_key: change.idempotency_key, payload_hex: change.payload_hex,
   }, `writer-${index}`));
   const [results, firstPage] = await Promise.all([Promise.all(appends), following]);
@@ -53,7 +72,7 @@ try {
   for (const result of results) assert.equal(result.first, result.last);
   receipt.checks.push('multiple logical clients append while follow is pending');
 
-  const retries = await Promise.all(changes.map((change, index) => bridge.ok('append', {
+  const retries = await Promise.all(changes.map((change, index) => append({
     log, idempotency_key: change.idempotency_key, payload_hex: change.payload_hex,
   }, `retry-${index}`)));
   retries.forEach((result, index) => assert.deepEqual(result, results[index], 'retry result changed'));
@@ -73,7 +92,7 @@ try {
   await writeFile(join(recoveryConfig, 'config.toml'), await readFile(join(configDir, 'config.toml')), { mode: 0o600 });
   bridge = new Bridge(binary, recoveryConfig);
   await bridge.ok('hello');
-  const restartedRetry = await bridge.ok('append', {
+  const restartedRetry = await append({
     log, idempotency_key: changes[0].idempotency_key, payload_hex: changes[0].payload_hex,
   }, 'fresh-client');
   assert.deepEqual(restartedRetry, results[0]);
@@ -108,9 +127,18 @@ try {
   assert.equal(byteLimited.next_cursor, '2');
   receipt.checks.push('fresh client replays exact bytes with bounded pages and no silent gaps');
 
+  await writeAttemptEvidence();
   const success = await writeSuccessfulCapture(bridge, outputDir, captured, receipt);
   console.log(JSON.stringify(success));
 } finally {
+  appendCancellation.abort();
+  await Promise.allSettled(appendCalls);
   await bridge.close().catch(() => {});
-  await rm(recoveryConfig, { recursive: true, force: true });
+  try {
+    // Evidence survives failed runs; receipt.json still requires all assertions
+    // and a clean final close through writeSuccessfulCapture.
+    if (!attemptEvidenceWritten) await writeAttemptEvidence();
+  } finally {
+    await rm(recoveryConfig, { recursive: true, force: true });
+  }
 }

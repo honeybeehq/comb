@@ -127,3 +127,37 @@ protocol-style warnings plus unused path-included test items. Evidence logs are
 Root must rerun its checks and immutable process captures against the integrated
 follow-up. Earlier development-binary capture evidence above belongs to `b5fc422`
 and is not evidence for this changed executable.
+
+## Acceptance caller recovery follow-up
+
+Root's immutable S3 forward capture returned a typed `backend_unavailable` append
+response with explicit same-key retry guidance. The runner used `Bridge.ok`, which
+asserted success immediately. Root independently confirmed that an identical retry
+recovered the committed range. This caller change does not modify Rust or the
+immutable production binary.
+
+Successful acceptance appends now use an explicit retry helper. It freezes the
+original log, key hex and payload hex, allows six attempts within one 60-second
+monotonic deadline, and uses exponential backoff from 100 ms capped at 2 seconds.
+Each request gets the remaining deadline, not a fresh timeout. Only an explicit
+`ok:false` with `backend_unavailable` is retried. Conflict, cancellation, deadline,
+loss and protocol or transport errors remain terminal. No loop restarts a broker.
+
+Attempt evidence includes response IDs, outcomes, elapsed time, backoff, and exact
+wire-string fingerprints. Successful receipts contain the attempt history. Failed
+runs write `append-attempts.json` after cancelling and settling sibling appends,
+without a receipt or feed capture. Success evidence is persisted before attempting
+receipt creation; the existing clean-close and fresh-directory rules remain intact.
+The original failed S3 artifact was not modified.
+
+Verification: all 24 Node key/client tests pass, including deterministic identity
+preservation, attempt exhaustion, shrinking deadline budgets, pending-request timeout,
+cancellation during backoff and requests, terminal errors, and late protocol junk.
+A failure-only child drives the actual acceptance runner to exhaustion and confirms
+that attempt evidence exists while both success artifacts are absent. Existing
+success receipt and stale-output tests remain. JavaScript syntax and diff whitespace
+checks pass. Evidence: `/tmp/bridge-caller-retry-tests.log`.
+
+The failure-only child is a client test, not storage acceptance. Root owns repeating
+all six backend captures and fresh Loro reconstruction with the unchanged immutable
+production executable and this checked runner.

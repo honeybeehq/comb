@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -49,7 +51,7 @@ export class Bridge {
           const pending = this.pending.get(response.id);
           assert.ok(pending, `unsolicited response ${response.id}`);
           this.pending.delete(response.id);
-          clearTimeout(pending.timer);
+          pending.cleanup();
           pending.resolve(response);
         }
         assert.ok(Buffer.byteLength(this.buffer) <= this.maxFrameBytes, 'bridge emitted an unbounded partial frame');
@@ -63,7 +65,7 @@ export class Bridge {
   fail(error) {
     this.terminalError ??= error;
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      pending.cleanup();
       pending.reject(this.terminalError);
     }
     this.pending.clear();
@@ -73,8 +75,10 @@ export class Bridge {
     if (this.terminalError) throw this.terminalError;
   }
 
-  async request(method, fields = {}, client = 'client') {
+  async request(method, fields = {}, client = 'client', { timeoutMs = 60_000, signal } = {}) {
     this.assertHealthy();
+    signal?.throwIfAborted();
+    assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0, 'request timeout must be finite and positive');
     assert.ok(!this.closing && !this.closed, 'request after bridge close');
     const id = `${client}-${++this.nextId}`;
     const frame = JSON.stringify({ v: 1, id, op: method, ...fields });
@@ -83,8 +87,17 @@ export class Bridge {
       const timer = setTimeout(() => {
         this.fail(new Error(`request ${id}/${method} timed out`));
         this.child.kill();
-      }, 60_000);
-      this.pending.set(id, { resolve, reject, timer });
+      }, timeoutMs);
+      const abort = () => {
+        this.fail(signal.reason ?? new DOMException('request cancelled', 'AbortError'));
+        this.child.kill();
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+      };
+      this.pending.set(id, { resolve, reject, cleanup });
+      signal?.addEventListener('abort', abort, { once: true });
       try {
         this.child.stdin.write(frame + '\n');
       } catch (error) {
@@ -132,4 +145,74 @@ export async function writeSuccessfulCapture(bridge, directory, changes, receipt
   await writeFile(join(directory, 'captured-feed.json'), JSON.stringify({ changes }, null, 2) + '\n', { flag: 'wx' });
   await writeFile(join(directory, 'receipt.json'), JSON.stringify(success, null, 2) + '\n', { flag: 'wx' });
   return success;
+}
+
+export const APPEND_RETRY_POLICY = Object.freeze({
+  timeoutMs: 60_000,
+  maxAttempts: 6,
+  initialBackoffMs: 100,
+  maxBackoffMs: 2_000,
+});
+
+// Only an explicit unavailable append response is retried. Transport failures,
+// request timeouts, conflict, and cancellation remain terminal for this run.
+export async function appendWithRetry(bridge, fields, client, {
+  policy = APPEND_RETRY_POLICY,
+  signal,
+  onAttempt = () => {},
+  now = () => performance.now(),
+  sleep = (ms, signal) => delay(ms, undefined, { signal }),
+} = {}) {
+  const { timeoutMs, maxAttempts, initialBackoffMs, maxBackoffMs } = policy;
+  assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0);
+  assert.ok(Number.isSafeInteger(maxAttempts) && maxAttempts > 0);
+  assert.ok(Number.isFinite(initialBackoffMs) && initialBackoffMs > 0);
+  assert.ok(Number.isFinite(maxBackoffMs) && maxBackoffMs >= initialBackoffMs);
+  const original = Object.freeze({
+    log: fields.log,
+    idempotency_key: fields.idempotency_key,
+    payload_hex: fields.payload_hex,
+  });
+  for (const value of Object.values(original)) assert.equal(typeof value, 'string');
+  const fingerprint = text => createHash('sha256').update(text).digest('hex');
+  const identity = {
+    client,
+    log: original.log,
+    // Hash the exact wire strings so casing changes are observable too.
+    key_hex_sha256: fingerprint(original.idempotency_key),
+    payload_hex_sha256: fingerprint(original.payload_hex),
+  };
+  const start = now();
+  const deadline = start + timeoutMs;
+  const exhausted = why => new Error(`append retry ${why}; outcome may be committed; retry the same log, key and bytes`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    signal?.throwIfAborted();
+    bridge.assertHealthy();
+    const remaining = deadline - now();
+    if (remaining <= 0) throw exhausted('deadline exceeded');
+    let response;
+    try {
+      response = await bridge.request('append', original, client, { timeoutMs: remaining, signal });
+      bridge.assertHealthy();
+    } catch (error) {
+      onAttempt({ ...identity, attempt, elapsed_ms: now() - start, outcome: 'transport_or_client_failure', message: error.message });
+      throw error;
+    }
+    const code = response.ok === true ? 'ok' : response.ok === false ? response.error?.code : undefined;
+    const backoff = Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs);
+    const expired = now() >= deadline;
+    const retry = !expired && code === 'backend_unavailable' && attempt < maxAttempts && deadline - now() > backoff;
+    onAttempt({ ...identity, attempt, request_id: response.id, elapsed_ms: now() - start,
+      outcome: code ?? 'invalid_response', deadline_exceeded: expired, retry, backoff_ms: retry ? backoff : 0 });
+    signal?.throwIfAborted();
+    if (expired) throw exhausted('deadline exceeded');
+    if (response.ok === true) {
+      const { v, id, ok, op, ...result } = response;
+      return result;
+    }
+    assert.equal(code, 'backend_unavailable', JSON.stringify(response));
+    if (attempt === maxAttempts) throw exhausted('attempts exhausted');
+    if (!retry) throw exhausted('deadline exceeded');
+    await sleep(backoff, signal);
+  }
 }
