@@ -357,11 +357,15 @@ fn typed_error_mapping_keeps_integrity_unavailable_deadline_and_cancel_distinct(
     );
 }
 
+#[derive(Default)]
 struct BoundedProbe {
     inner: MemoryBackend,
     bounded_reads: std::sync::atomic::AtomicUsize,
     stall: std::sync::atomic::AtomicBool,
     started: tokio::sync::Notify,
+    fail_open: std::sync::atomic::AtomicBool,
+    stall_upload: std::sync::atomic::AtomicBool,
+    release_faults: std::sync::atomic::AtomicBool,
 }
 #[async_trait::async_trait]
 impl ObjectBackend for BoundedProbe {
@@ -370,6 +374,10 @@ impl ObjectBackend for BoundedProbe {
         key: &str,
         body: &[u8],
     ) -> comb_core::error::Result<comb_object::Version> {
+        if self.stall_upload.swap(false, Ordering::SeqCst) {
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+        }
         self.inner.put_create(key, body).await
     }
     async fn put_update(
@@ -378,6 +386,23 @@ impl ObjectBackend for BoundedProbe {
         expected: Option<&comb_object::Version>,
         body: &[u8],
     ) -> comb_core::error::Result<comb_object::Version> {
+        if self.release_faults.load(Ordering::SeqCst)
+            && key.contains("/refs/")
+            && serde_json::from_slice::<comb_core::RefValue>(body)
+                .is_ok_and(|reference| reference.lease.is_none())
+        {
+            if key.contains("/bad/") {
+                return Err(comb_core::CoreError::BackendUnavailable(
+                    "release failed".into(),
+                ));
+            }
+            if key.contains("/slow/") {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if key.contains("/stuck/") {
+                std::future::pending::<()>().await;
+            }
+        }
         self.inner.put_update(key, expected, body).await
     }
     async fn get(&self, _: &str) -> comb_core::error::Result<(Vec<u8>, comb_object::Version)> {
@@ -389,6 +414,11 @@ impl ObjectBackend for BoundedProbe {
         limit: std::num::NonZeroU64,
     ) -> comb_core::error::Result<(Vec<u8>, comb_object::Version)> {
         self.bounded_reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_open.load(Ordering::SeqCst) {
+            return Err(comb_core::CoreError::BackendUnavailable(
+                "open failed".into(),
+            ));
+        }
         if self.stall.load(Ordering::SeqCst) {
             self.started.notify_one();
             std::future::pending::<()>().await;
@@ -413,6 +443,7 @@ async fn actual_backend_reads_are_bounded_and_pending_io_is_cancellable() {
         bounded_reads: 0.into(),
         stall: false.into(),
         started: tokio::sync::Notify::new(),
+        ..Default::default()
     });
     let b = Arc::new(broker(backend.clone()));
     let payload = "ff".repeat(Limits::default().max_append_bytes);
@@ -460,4 +491,143 @@ async fn raw_head(backend: &dyn ObjectBackend) -> comb_core::RefValue {
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn failed_opens_do_not_exhaust_registry_capacity() {
+    let backend = Arc::new(BoundedProbe::default());
+    let b = broker(backend.clone());
+    backend.fail_open.store(true, Ordering::SeqCst);
+    for i in 0..256 {
+        let response = rpc(
+            &b,
+            json!({"v":1,"id":"h","op":"head","log":format!("failed-{i}")}),
+        )
+        .await;
+        assert_eq!(
+            response["error"]["code"], "backend_unavailable",
+            "{response}"
+        );
+    }
+    backend.fail_open.store(false, Ordering::SeqCst);
+    let response = head(&b).await;
+    assert_eq!(response["ok"], true, "{response}");
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_opens_do_not_exhaust_registry_capacity() {
+    let backend = Arc::new(BoundedProbe::default());
+    let b = Arc::new(broker(backend.clone()));
+    backend.stall.store(true, Ordering::SeqCst);
+    for i in 0..256 {
+        let owner = b.clone();
+        let task = tokio::spawn(async move {
+            rpc(
+                &owner,
+                json!({"v":1,"id":"h","op":"head","log":format!("cancelled-{i}")}),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), backend.started.notified())
+            .await
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    backend.stall.store(false, Ordering::SeqCst);
+    assert_eq!(head(&b).await["ok"], true);
+    b.close().await.unwrap();
+}
+
+async fn append_log(b: &Bridge, log: &str) {
+    let mut request = append("a", "01", "00");
+    request["log"] = json!(log);
+    let response = rpc(b, request).await;
+    assert_eq!(response["ok"], true, "{response}");
+}
+async fn raw_log_head(backend: &dyn ObjectBackend, log: &str) -> comb_core::RefValue {
+    let (bytes, _) = backend
+        .get_limited(
+            &format!("comb/v3/tenants/org_adapter/refs/log/{log}/p0.json"),
+            std::num::NonZeroU64::new(64 * 1024).unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn failed_release_does_not_abort_healthy_siblings() {
+    let backend = Arc::new(BoundedProbe::default());
+    let b = broker(backend.clone());
+    for log in ["bad", "slow"] {
+        append_log(&b, log).await;
+    }
+    backend.release_faults.store(true, Ordering::SeqCst);
+    let error = b.close().await.unwrap_err().to_string();
+    assert!(
+        raw_log_head(&backend.inner, "slow").await.lease.is_none(),
+        "{error}"
+    );
+    assert!(raw_log_head(&backend.inner, "bad").await.lease.is_some());
+    assert!(error.contains("bad") && error.contains("slow"), "{error}");
+}
+
+#[tokio::test]
+async fn release_deadline_reports_completed_and_uncertain_logs() {
+    let backend = Arc::new(BoundedProbe::default());
+    let b = broker(backend.clone());
+    for log in ["slow", "stuck"] {
+        append_log(&b, log).await;
+    }
+    backend.release_faults.store(true, Ordering::SeqCst);
+    let error = tokio::time::timeout(Duration::from_secs(4), b.close())
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(raw_log_head(&backend.inner, "slow").await.lease.is_none());
+    assert!(raw_log_head(&backend.inner, "stuck").await.lease.is_some());
+    assert!(error.contains("slow") && error.contains("stuck"), "{error}");
+}
+
+#[tokio::test]
+async fn eof_cancels_stalled_append_and_attempts_healthy_release() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let backend = Arc::new(BoundedProbe::default());
+    let b = Arc::new(broker(backend.clone()));
+    assert_eq!(rpc(&b, append("warm", "01", "00")).await["ok"], true);
+    backend.stall_upload.store(true, Ordering::SeqCst);
+    let (mut input, server_input) = tokio::io::duplex(4096);
+    let (output, server_output) = tokio::io::duplex(4096);
+    let server = tokio::spawn(bridge::stdio::run(server_input, server_output, b));
+    let mut bytes = serde_json::to_vec(&append("stalled", "02", "ff")).unwrap();
+    bytes.push(b'\n');
+    input.write_all(&bytes).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), backend.started.notified())
+        .await
+        .unwrap();
+    input.shutdown().await.unwrap();
+    let mut lines = BufReader::new(output).lines();
+    let response = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "forced request cancellation cannot report a clean exit"
+    );
+    assert!(
+        raw_head(&backend.inner).await.lease.is_none(),
+        "healthy release was skipped: {result:?}"
+    );
+    let response: Value =
+        serde_json::from_str(&response.expect("cancelled append response")).unwrap();
+    assert_eq!(response["id"], "stalled");
+    assert_eq!(response["error"]["code"], "cancelled");
 }

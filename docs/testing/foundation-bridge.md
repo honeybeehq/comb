@@ -117,11 +117,24 @@ committed-key retries remain available. Error messages describe the loss cause, 
 clients branch on codes. An unavailable, cancelled, or timed-out append may already
 be committed. Retry with the identical key and bytes; do not mint another identity.
 
-EOF permits admitted requests to drain for at most four seconds, including session
-release and output. Release calls share a three-second budget. A blocked output frame
-also has a four-second write budget. Failed shutdown exits unsuccessfully so the
-acceptance client cannot write a success receipt. Cancellation drops the owning
-JoinSets and cached sessions, which stops Comb's renewal tasks.
+EOF has a four-second total shutdown budget. Admitted requests first get a 500 ms
+grace period without cancellation. Remaining requests are cancelled and get up to
+250 ms to drain, leaving a three-second budget for independent session closes.
+One failed release or a slot still held by a caller does not skip other sessions.
+Cleanup errors identify logs whose closes completed, failed, or remain uncertain.
+A failed backend or forced termination can leave a lease until its TTL expires;
+the bridge does not guarantee release in those cases.
+
+During normal operation, each output frame has a separate 30-second write budget.
+EOF still bounds output draining by the total shutdown deadline. Failed shutdown
+exits unsuccessfully so the acceptance client cannot write a success receipt.
+Cancellation drops the owning JoinSets and cached sessions, which stops Comb's
+renewal tasks.
+
+Failed or cancelled feed initialization does not permanently consume one of the
+256 registry slots. The last request removes an empty slot under the registry lock.
+Concurrent waiters retain the same slot. Initialized feeds and sessions remain
+registered so a lost session is never silently replaced.
 
 ## Foundation fixture
 

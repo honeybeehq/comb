@@ -75,3 +75,55 @@ The adapter can advertise both storage capabilities after these checks. This is
 not a Foundation deployment-readiness claim. Root still owns immutable-binary
 capture on local, MinIO and S3 and fresh Loro reconstruction in both orders.
 No live backend or shared daemon was changed by this adapter work.
+
+## Lifecycle follow-up after fixed-source review
+
+Root review `/tmp/comb-foundation-adapter-review.md` and dispositions in
+`/tmp/comb-foundation-adapter-current-task.md` identified the following bridge
+issues on `b5fc422`. Shared R2 production code is unchanged.
+
+- B2 and M3: close no longer returns on the first failed release or retained slot.
+  It runs independent closes until the shared deadline, records completed outcomes,
+  and reports each failed or uncertain log. Deadline expiry can abort unresolved
+  releases. A successful sibling close is retained in the diagnostic report.
+- M1: a request guard removes an uninitialized slot only after the last caller
+  releases it. Reference decrement and registry removal share one mutex. This
+  covers failed opens, cancelled opens, and simultaneous final caller drops without
+  allowing a waiting caller to initialize an orphan beside a replacement slot.
+  Initialized feed identities remain registered.
+- B1: orderly EOF gives admitted requests 500 ms without cancellation, then reserves
+  250 ms for cancellation drain and three seconds for session closes within the
+  existing four-second total. A stalled data upload no longer prevents an otherwise
+  healthy release. Backend failure or forced termination can still leave a lease
+  until expiry. Such a shutdown does not produce a success receipt.
+- M2: steady-state output uses a separate finite 30-second per-frame timeout.
+  Observed EOF still applies the four-second total shutdown budget.
+- L1: no change. `writer_session` returns `InvalidLeasePolicy`; its current mapping
+  is specific to that actual return type.
+
+Before the fix, six added runtime regressions failed against the prior production
+code: failed and cancelled opens exhausted capacity, a failed release aborted a
+healthy sibling, deadline errors omitted log outcomes, EOF skipped a healthy release
+after stalled publication, and 4.3 seconds of output backpressure killed the bridge.
+The failing output is `/tmp/bridge-followup-red.log`.
+
+After the fix, all 58 owned Rust test executions pass: 16 adapter, 24 protocol,
+10 transport, 5 real-process Foundation, and 3 binary unit executions. These counts
+include repeated path-included unit tests. Both existing EOF success assertions
+remain unchanged and each passes 20 repeated real-process runs. Additional unit
+coverage checks retained-slot cleanup and concurrent final guard drops.
+
+Root's four independent tests from `/tmp/comb-foundation-parent-regressions.rs`
+were copied unchanged to an ephemeral test target in this worktree. All four pass,
+including a five-second output pause and a stall limited to actual chunk uploads.
+The temporary target is not part of the change. Root's fixed archive was not touched.
+
+The eight Node client/key tests, acceptance-script syntax, targeted clippy, rustfmt,
+and diff whitespace checks pass. Clippy still reports existing shared-code and
+protocol-style warnings plus unused path-included test items. Evidence logs are
+`/tmp/bridge-followup-all.log`, `/tmp/bridge-followup-eof-repeats.log`,
+`/tmp/bridge-followup-node.log`, and `/tmp/bridge-followup-clippy.log`.
+
+Root must rerun its checks and immutable process captures against the integrated
+follow-up. Earlier development-binary capture evidence above belongs to `b5fc422`
+and is not evidence for this changed executable.

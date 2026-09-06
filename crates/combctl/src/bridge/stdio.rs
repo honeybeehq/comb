@@ -4,11 +4,18 @@ use super::handler::Bridge;
 use super::handler::SHUTDOWN_BUDGET;
 use super::protocol::{extract_id, parse_request, validate_id, Response};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::Notify;
+use tokio::sync::oneshot;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Instant};
+
+// Total EOF budget remains four seconds: grace + cancellation drain + the
+// bridge's three-second release budget, with time left for queued output.
+const REQUEST_DRAIN_GRACE: Duration = Duration::from_millis(500);
+const CANCEL_DRAIN_BUDGET: Duration = Duration::from_millis(250);
+const STEADY_WRITE_BUDGET: Duration = Duration::from_secs(30);
 
 struct AbortOnDrop(Arc<Bridge>);
 impl Drop for AbortOnDrop {
@@ -23,8 +30,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let _abort = AbortOnDrop(bridge.clone());
-    let shutdown = Arc::new(Notify::new());
-    let shutdown_started = shutdown.clone();
+    let (shutdown_started, mut shutdown) = oneshot::channel();
     let limits = bridge.limits.clone();
     let max_frame_bytes = limits.max_frame_bytes;
     let max_id_len = limits.max_id_len;
@@ -34,7 +40,7 @@ where
         let mut stdout = stdout;
         while let Some(line) = rx.recv().await {
             let line = cap_stdout_frame(line, max_frame_bytes, max_id_len)?;
-            timeout(SHUTDOWN_BUDGET, async {
+            timeout(STEADY_WRITE_BUDGET, async {
                 stdout.write_all(line.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await
@@ -54,7 +60,7 @@ where
             }
             match read_jsonl_frame(&mut reader, limits.max_frame_bytes).await? {
                 FrameRead::Eof => {
-                    shutdown_started.notify_one();
+                    let _ = shutdown_started.send(Instant::now() + SHUTDOWN_BUDGET);
                     break;
                 }
                 FrameRead::Oversized { id } => {
@@ -84,10 +90,41 @@ where
             }
         }
         drop(tx);
-        while let Some(result) = inflight.join_next().await {
-            result?;
+        let mut failures = Vec::new();
+        let drained = timeout(REQUEST_DRAIN_GRACE, async {
+            while let Some(result) = inflight.join_next().await {
+                if result.is_err() {
+                    failures.push("request task failed".to_owned());
+                }
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            failures.push("request drain grace exceeded; pending requests cancelled".to_owned());
+            bridge.cancel_requests();
+            let cancelled = timeout(CANCEL_DRAIN_BUDGET, async {
+                while let Some(result) = inflight.join_next().await {
+                    if result.is_err() {
+                        failures.push("request task failed".to_owned());
+                    }
+                }
+            })
+            .await
+            .is_ok();
+            if !cancelled {
+                failures.push("request cancellation drain exceeded".to_owned());
+            }
         }
-        bridge.close().await?;
+        // Drop aborts any handler stuck delivering output before independent
+        // session cleanup. Healthy admitted hello/append already had their grace.
+        drop(inflight);
+        if let Err(err) = bridge.close().await {
+            failures.push(err.to_string());
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("bridge shutdown: {}", failures.join("; "));
+        }
         Ok::<(), anyhow::Error>(())
     });
     // EOF drains the writer. Either task failing drops this JoinSet, cancelling
@@ -98,8 +135,8 @@ where
             result = transport.join_next() => {
                 if let Some(result) = result { result??; }
             }
-            _ = shutdown.notified(), if shutdown_deadline.is_none() => {
-                shutdown_deadline = Some(Instant::now() + SHUTDOWN_BUDGET);
+            deadline = &mut shutdown, if shutdown_deadline.is_none() => {
+                shutdown_deadline = Some(deadline.map_err(|_| anyhow::anyhow!("bridge input ended before EOF"))?);
             }
             _ = async {
                 if let Some(deadline) = shutdown_deadline {

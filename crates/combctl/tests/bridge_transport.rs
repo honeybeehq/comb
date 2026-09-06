@@ -316,3 +316,36 @@ async fn oversized_error_preserves_a_valid_request_id() {
     assert_eq!(response["error"]["code"], "invalid_request");
     assert_eq!(response["id"], "known-request");
 }
+
+#[tokio::test]
+async fn steady_state_reader_can_pause_longer_than_four_seconds() {
+    let (mut input, server_input) = tokio::io::duplex(4096);
+    // A hello response cannot fit until the reader resumes.
+    let (output, server_output) = tokio::io::duplex(32);
+    let server = tokio::spawn(stdio::run(
+        server_input,
+        server_output,
+        mem_bridge(Limits::default()),
+    ));
+    write_line(&mut input, json!({"v":1,"id":"delayed","op":"hello"})).await;
+    tokio::time::sleep(Duration::from_millis(4300)).await;
+    assert!(
+        !server.is_finished(),
+        "healthy process died during temporary backpressure"
+    );
+    let mut lines = BufReader::new(output).lines();
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["id"], "delayed");
+    input.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

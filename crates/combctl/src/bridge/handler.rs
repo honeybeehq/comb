@@ -27,6 +27,35 @@ const MAX_OPEN_LOGS: usize = 256;
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(4);
 const RELEASE_BUDGET: Duration = Duration::from_secs(3);
 
+// Every request holds a guard, including while it waits for initialization.
+// Only the last request may remove an empty slot. Checking under the registry
+// lock prevents a new caller from retaining an orphan while a replacement opens.
+struct FeedSlot<'a> {
+    bridge: &'a Bridge,
+    log: String,
+    slot: Option<Arc<OnceCell<FeedState>>>,
+}
+
+impl Drop for FeedSlot<'_> {
+    fn drop(&mut self) {
+        let mut feeds = self.bridge.feeds.lock().expect("feed registry poisoned");
+        let slot = self.slot.take().expect("request owns a feed slot");
+        let same_slot = feeds
+            .get(&self.log)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &slot));
+        // Decrement our reference while still holding the mutex. Otherwise two
+        // simultaneous drops could both observe the other's last reference.
+        drop(slot);
+        if same_slot
+            && feeds
+                .get(&self.log)
+                .is_some_and(|entry| entry.get().is_none() && Arc::strong_count(entry) == 1)
+        {
+            feeds.remove(&self.log);
+        }
+    }
+}
+
 struct FeedState {
     feed: CompleteFeed,
     session: OnceCell<WriterSession>,
@@ -127,7 +156,15 @@ impl Bridge {
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         };
+        let slot = FeedSlot {
+            bridge: self,
+            log: log.clone(),
+            slot: Some(slot),
+        };
         let state = match slot
+            .slot
+            .as_ref()
+            .expect("request owns a feed slot")
             .get_or_try_init(|| async {
                 let feed = CompleteFeed::open(self.store.clone(), log.clone(), call).await?;
                 Ok::<_, combctl::log::OpenLogError>(FeedState {
@@ -314,33 +351,78 @@ impl Bridge {
         self.feeds.lock().expect("feed registry poisoned").clear();
     }
 
-    // Called only after admitted request tasks have finished. Closing consumes
-    // sessions and propagates release errors; an abort only drops/halts renewal.
+    // Independent releases run through the shared deadline even when a sibling
+    // fails. Failure diagnostics retain completed and uncertain log outcomes.
+    // Forced abort only drops/halts renewal; release is never guaranteed.
     pub async fn close(&self) -> anyhow::Result<()> {
         self.cancel_requests();
         let feeds = std::mem::take(&mut *self.feeds.lock().expect("feed registry poisoned"));
         let deadline = Instant::now() + RELEASE_BUDGET;
         let mut closing = JoinSet::new();
-        for (_, slot) in feeds {
-            let slot = Arc::try_unwrap(slot)
-                .map_err(|_| anyhow::anyhow!("requests remain during bridge close"))?;
+        let mut pending = HashMap::new();
+        let mut outcomes = Vec::new();
+        let mut failed = false;
+        for (log, slot) in feeds {
+            let Ok(slot) = Arc::try_unwrap(slot) else {
+                outcomes.push(format!("{log}: requests remain; release uncertain"));
+                failed = true;
+                continue;
+            };
             if let Some(state) = slot.into_inner() {
                 if let Some(session) = state.session.into_inner() {
-                    closing.spawn(async move {
+                    let task = closing.spawn(async move {
                         let call = CallContext::new(deadline, CancellationToken::new());
                         session.close(&call).await
                     });
+                    pending.insert(task.id(), log);
                 }
             }
         }
-        while let Some(result) = tokio::time::timeout_at(deadline, closing.join_next())
-            .await
-            .map_err(|_| anyhow::anyhow!("publisher release deadline exceeded"))?
-        {
-            if let Err(err) = result? {
-                let response = lease_error("", err);
-                anyhow::bail!("publisher release failed: {}", response.to_jsonl());
+        loop {
+            // Account for already-completed tasks even at the deadline.
+            let result = match closing.try_join_next_with_id() {
+                Some(result) => Some(result),
+                None => {
+                    match tokio::time::timeout_at(deadline, closing.join_next_with_id()).await {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    }
+                }
+            };
+            match result {
+                Some(Ok((task, result))) => {
+                    let log = pending.remove(&task).expect("tracked release task");
+                    match result {
+                        Ok(()) => outcomes.push(format!("{log}: released")),
+                        Err(err) => {
+                            failed = true;
+                            outcomes.push(format!(
+                                "{log}: release uncertain: {}",
+                                lease_error("", err).to_jsonl()
+                            ));
+                        }
+                    }
+                }
+                Some(Err(err)) => {
+                    let log = pending.remove(&err.id()).expect("tracked release task");
+                    failed = true;
+                    outcomes.push(format!("{log}: release task failed; release uncertain"));
+                }
+                None => break,
             }
+        }
+        if !pending.is_empty() {
+            failed = true;
+            closing.abort_all();
+            for log in pending.into_values() {
+                outcomes.push(format!(
+                    "{log}: publisher release deadline exceeded; release uncertain"
+                ));
+            }
+        }
+        if failed {
+            outcomes.sort();
+            anyhow::bail!("publisher cleanup: {}", outcomes.join("; "));
         }
         Ok(())
     }
@@ -370,4 +452,103 @@ fn page_response(id: String, log: String, page: ReadPage, timed_out: Option<bool
             timed_out,
         },
     )
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use comb_core::DigestKey;
+    use comb_object::{memory::MemoryBackend, ObjectBackend};
+    use serde_json::json;
+
+    fn broker(backend: Arc<MemoryBackend>) -> Bridge {
+        Bridge::new(
+            Store::new(backend, "cleanup", DigestKey::from_bytes([43; 32]), None),
+            "cleanup".into(),
+            30,
+            Limits::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_slot_waiters_keep_one_identity_until_the_last_guard_drops() {
+        let bridge = broker(Arc::new(MemoryBackend::new()));
+        for _ in 0..32 {
+            let slot = Arc::new(OnceCell::new());
+            bridge
+                .feeds
+                .lock()
+                .unwrap()
+                .insert("doc".into(), slot.clone());
+            let first = FeedSlot {
+                bridge: &bridge,
+                log: "doc".into(),
+                slot: Some(slot.clone()),
+            };
+            let waiter = FeedSlot {
+                bridge: &bridge,
+                log: "doc".into(),
+                slot: Some(slot),
+            };
+            drop(first);
+            let replacement = bridge.feeds.lock().unwrap().get("doc").unwrap().clone();
+            assert!(Arc::ptr_eq(waiter.slot.as_ref().unwrap(), &replacement));
+            let third = FeedSlot {
+                bridge: &bridge,
+                log: "doc".into(),
+                slot: Some(replacement),
+            };
+            // Both final drops use the registry lock to decrement their refs.
+            let barrier = &std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    barrier.wait();
+                    drop(waiter);
+                });
+                scope.spawn(move || {
+                    barrier.wait();
+                    drop(third);
+                });
+            });
+            assert!(bridge.feeds.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_slot_does_not_skip_unrelated_release() {
+        let backend = Arc::new(MemoryBackend::new());
+        let bridge = broker(backend.clone());
+        for log in ["retained", "healthy"] {
+            let response = bridge.handle_frame(&serde_json::to_vec(&json!({
+                "v":1,"id":"a","op":"append","log":log,"idempotency_key":"01","payload_hex":"00"
+            })).unwrap()).await;
+            assert_eq!(serde_json::to_value(response).unwrap()["ok"], true);
+        }
+        let retained = bridge
+            .feeds
+            .lock()
+            .unwrap()
+            .get("retained")
+            .unwrap()
+            .clone();
+        let error = bridge.close().await.unwrap_err().to_string();
+        assert!(
+            error.contains("retained") && error.contains("healthy"),
+            "{error}"
+        );
+        let (bytes, _) = backend
+            .get_limited(
+                "comb/v3/tenants/cleanup/refs/log/healthy/p0.json",
+                std::num::NonZeroU64::new(65536).unwrap(),
+            )
+            .await
+            .unwrap();
+        let reference: comb_core::RefValue = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            reference.lease.is_none(),
+            "unrelated release skipped: {error}"
+        );
+        drop(retained);
+    }
 }
