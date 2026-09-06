@@ -6,7 +6,7 @@ Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evid
 
 - Root09572752 owns integration branchfeat/reliable-log-r1 in comb-reliable-log-r1, contracts, CI, review and live backend acceptance.
 - R1owner30db6b86: production accepted through aa94980. Final lost-CAS drill e61d872 passed memory/local with the owner and immutable S3/MinIO runs with root. Current task is accepted/idle.
-- R2owner3311b020-3aa4-45b6-bae4-9acc0fbcedf1: comb-reliable-log-r2, branchfeat/reliable-log-r2, private target-r2. Phase 1 b5fc5d2 is under correction after fixed-commit review. Instructions `/tmp/comb-r2-current-task.md` provide R1 picks a675d38, db41bce, e0c911e, 05d3816, aa94980 and e61d872, then authorize catalog/pages/sessions without another signature wait.
+- R2owner3311b020-3aa4-45b6-bae4-9acc0fbcedf1: comb-reliable-log-r2, branchfeat/reliable-log-r2, private target-r2. R2 catalog/feed checkpoint 2587de1 failed root failure-path verification. Ten assertions failed and one close test hung. Owner is integrating remaining R1 followups and correcting feed/catalog/session behavior. Instructions `/tmp/comb-r2-current-task.md` provide R1 picks a675d38, db41bce, e0c911e, 05d3816, aa94980 and e61d872, then authorize catalog/pages/sessions without another signature wait.
 - Foundationlead2efd79a9 owns bridge/fixture/acceptance paths. Parent adapter wiring waits for root-checked R2 APIs. Storage caps remainfalse.
 - Pheromoneowner135f7971: A1 accepted at16b3a2e in pher-comb-log/feat/comb-log; now idle. Current-only task `/tmp/comb-pher-current-task.md`.
 - RetiredR1b9ca has no ownership. Its branchfeat/reliable-log and commits4706b79/29d271e are excluded.
@@ -20,6 +20,8 @@ Coordination reference updated 2026-09-06T09:58:55.442884+00:00. Acceptance evid
 
 - R1 after-success CAS reply-loss drills passed on S3 and MinIO with immutable binary f2d6a4e0bfa154b3d2b603c36455a950dad930274016bf5c6189e4681ffab27a. [Receipt](verification/r1-live-lost-cas-e61d872.json). CI 34026375339 at aa94980 passed.
 - [R2 phase 1 review](../../review/reliable-log-r2-phase1.md) requires tenant validation, plaintext bounds before cloning/callbacks, strict legacy codecs and cache recovery.
+
+- [R2 catalog/feed review](../../review/reliable-log-r2-catalog-feed.md) records fixed-2587de1 source findings and eleven executed failure cases. [Receipt](verification/r2-parent-review-2587de1.json). Later owner edits require a fresh fixed-commit run.
 
 ## Remaining gates
 

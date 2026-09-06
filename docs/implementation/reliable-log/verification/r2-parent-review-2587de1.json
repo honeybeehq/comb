@@ -1,0 +1,88 @@
+{
+  "source_sha": "2587de1953d1acdc866e0df6e5f2f5db522da1c0",
+  "feed": {
+    "source_sha": "2587de1953d1acdc866e0df6e5f2f5db522da1c0",
+    "binary_sha256": "eb031f0cd051aad0ee8d6858889640585c8399022867d37c4109192615866a8d",
+    "test_source_sha256": "1a9620e90b9e70b0c953705a778a1f7fc34da7ee91aef43e4108fa1b61fd3e47",
+    "archive": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-root-review-a8lo7vgh",
+    "results": [
+      {
+        "test": "review_cancelled_read_is_cancelled",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.219
+      },
+      {
+        "test": "review_existing_v3_survives_later_v1_ref",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.214
+      },
+      {
+        "test": "review_expired_read_is_deadline_exceeded",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.114
+      },
+      {
+        "test": "review_foreign_manifest_is_not_replayed",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.235
+      },
+      {
+        "test": "review_max_head_is_integrity_not_overflow",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.295
+      },
+      {
+        "test": "review_read_never_uses_unbounded_get",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.232
+      },
+      {
+        "test": "review_transient_manifest_read_recovers",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.14
+      },
+      {
+        "test": "review_unacquired_close_completes",
+        "exit_code": null,
+        "timed_out": true,
+        "elapsed_seconds": 8.229
+      }
+    ]
+  },
+  "catalog": {
+    "source_sha": "2587de1953d1acdc866e0df6e5f2f5db522da1c0",
+    "binary_sha256": "6211bb1f33d9ceccdb42262e2bb5b91d3e4167f338397f905abeca83ab4c511c",
+    "test_source_sha256": "248f11b1961d8e029372a524f468b7173bda1b323eadc57a4ca60263b1724ca1",
+    "archive": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-root-review-a8lo7vgh",
+    "results": [
+      {
+        "test": "catalog::parent_review::review_2100_refs_preserve_every_child_height",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 10.88
+      },
+      {
+        "test": "catalog::parent_review::review_seek_rejects_depth_beyond_bound",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.064
+      },
+      {
+        "test": "catalog::parent_review::review_seek_rejects_noncovering_leaf",
+        "exit_code": 101,
+        "timed_out": false,
+        "elapsed_seconds": 0.067
+      }
+    ]
+  },
+  "disposition": "R2 not accepted: ten assertion failures and one externally bounded close hang",
+  "build": "private git archive plus APFS-cloned target; cargo test --offline --no-run; immutable binaries executed individually",
+  "isolation": "No owner worktree edits/builds. Only the private timed-out close test child was stopped."
+}
