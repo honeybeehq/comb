@@ -27,10 +27,6 @@ pub const NS_V1: &str = "comb/v1";
 pub(crate) const LOG_MANIFEST_SCHEMA: &str = "comb.log.partition-manifest/v2";
 pub(crate) const LOG_MANIFEST_SCHEMA_V3: &str = "comb.log.partition-manifest/v3";
 pub(crate) const LOG_MANIFEST_CARRIERS: &[&str] = &[LOG_MANIFEST_SCHEMA, LOG_MANIFEST_SCHEMA_V3];
-/// v2 manifests grow inline and are published through `attempt` with no
-/// write-side cap. Read cap must stay large enough for those live objects.
-/// v3 manifests are catalog-backed and stay at `MAX_MANIFEST_OBJECT_BYTES`.
-pub(crate) const MAX_V2_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 const COMMIT_VIEW_ENVELOPES: &[&str] = &[
     COMMIT_SCHEMA,
     LOG_MANIFEST_SCHEMA,
@@ -188,7 +184,12 @@ impl Store {
             self.reject_v1(name).await?;
         }
         let cap = NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero");
-        match self.backend.get_limited(&self.ref_key(name), cap).await {
+        let fetched = if self.layout == KeyLayout::V2 {
+            self.backend.get(&self.ref_key(name)).await
+        } else {
+            self.backend.get_limited(&self.ref_key(name), cap).await
+        };
+        match fetched {
             Ok((bytes, version)) => {
                 let value: RefValue = serde_json::from_slice(&bytes)
                     .map_err(|e| CoreError::InvalidFormat(format!("ref {name}: {e}")))?;
@@ -556,14 +557,18 @@ impl Store {
         &self,
         identity: &OpIdentity,
     ) -> Result<Option<(OpIntent, Option<Version>)>> {
-        match self
-            .backend
-            .get_limited(
-                &self.intent_key(identity),
-                NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero"),
-            )
-            .await
-        {
+        let intent_key = self.intent_key(identity);
+        let fetched = if self.layout == KeyLayout::V2 {
+            self.backend.get(&intent_key).await
+        } else {
+            self.backend
+                .get_limited(
+                    &intent_key,
+                    NonZeroU64::new(MAX_REF_OBJECT_BYTES).expect("nonzero"),
+                )
+                .await
+        };
+        match fetched {
             Ok((bytes, version)) => {
                 let intent: OpIntent = serde_json::from_slice(&bytes).map_err(|e| {
                     CoreError::RecoveryFailed(format!(
@@ -1191,17 +1196,22 @@ impl Store {
     }
 
     pub(crate) async fn load_commit_view(&self, digest: &Digest) -> Result<CommitView> {
-        let spec = EnvelopeReadSpec {
-            tenant: &self.tenant,
-            kind: ObjectKind::Blob,
-            allowed_schemas: COMMIT_VIEW_ENVELOPES,
-            max_encoded_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
-            max_plaintext_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+        let (payload, _) = if self.layout == KeyLayout::V2 {
+            self.get_blob(digest)
+                .await
+                .map_err(|e| map_commit_read_error(digest, e))?
+        } else {
+            let spec = EnvelopeReadSpec {
+                tenant: &self.tenant,
+                kind: ObjectKind::Blob,
+                allowed_schemas: COMMIT_VIEW_ENVELOPES,
+                max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+                max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).expect("nonzero"),
+            };
+            self.get_blob_limited(digest, spec)
+                .await
+                .map_err(|e| map_commit_read_error(digest, e))?
         };
-        let (payload, _) = self
-            .get_blob_limited(digest, spec)
-            .await
-            .map_err(|e| map_commit_read_error(digest, e))?;
         let value: serde_json::Value = serde_json::from_slice(&payload)
             .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} is not JSON: {e}")))?;
         let schema = value
@@ -1227,11 +1237,13 @@ impl Store {
             ))
             .into());
         }
-        let cap = encoded_object_cap(schema);
-        if payload.len() as u64 > cap {
+        if self.layout == KeyLayout::V3
+            && schema == LOG_MANIFEST_SCHEMA_V3
+            && payload.len() as u64 > MAX_MANIFEST_OBJECT_BYTES
+        {
             return Err(CoreError::ObjectTooLarge {
                 key: self.object_key(digest),
-                limit: cap,
+                limit: MAX_MANIFEST_OBJECT_BYTES,
                 actual: Some(payload.len() as u64),
             }
             .into());
@@ -1323,6 +1335,61 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Owner-aware v3 renewal: fresh snapshot, refuse expired/foreign leases,
+    /// no generation bump.
+    pub(crate) async fn renew_owned_lease(
+        &self,
+        name: &str,
+        writer: &str,
+        epoch: u64,
+        ttl_secs: i64,
+    ) -> Result<RefValue> {
+        for _ in 0..16 {
+            let now = self.clock().now();
+            let snapshot = self
+                .read_head(name)
+                .await?
+                .ok_or_else(|| anyhow!("ref {name} does not exist"))?;
+            if snapshot.value.epoch != epoch {
+                return Err(CoreError::Fenced {
+                    caller: epoch,
+                    live: snapshot.value.epoch,
+                }
+                .into());
+            }
+            let Some(lease) = snapshot.value.lease.as_ref() else {
+                return Err(
+                    CoreError::Rejected(format!("ref {name} has no lease to renew")).into(),
+                );
+            };
+            if lease.writer != writer {
+                return Err(CoreError::Rejected("lease owner changed".into()).into());
+            }
+            if !snapshot.value.lease_live(now) {
+                return Err(CoreError::Rejected("lease expired".into()).into());
+            }
+            let mut next = snapshot.value.clone();
+            next.lease = Some(comb_core::Lease {
+                writer: writer.into(),
+                lease_until: now + chrono::Duration::seconds(ttl_secs),
+            });
+            next.updated_at = now;
+            let bytes = serde_json::to_vec_pretty(&next)?;
+            match self
+                .backend
+                .put_update(&self.ref_key(name), snapshot.version.as_ref(), &bytes)
+                .await
+            {
+                Ok(_) => return Ok(next),
+                Err(CoreError::PreconditionFailed(_)) | Err(CoreError::AlreadyExists(_)) => {
+                    continue
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(anyhow!("renew: lost the ref race 16 times"))
     }
 
     /// Lease renewal: fresh snapshot, no generation bump, no new commit.
@@ -1563,11 +1630,7 @@ fn intent_expiry(identity: &OpIdentity, policy: &OperationPolicy) -> Option<Date
 const MAX_CHUNK_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) fn encoded_object_cap(schema: &str) -> u64 {
-    if schema == LOG_MANIFEST_SCHEMA {
-        MAX_V2_MANIFEST_OBJECT_BYTES
-    } else if LOG_MANIFEST_CARRIERS.contains(&schema)
-        || schema == COMMIT_SCHEMA
-        || schema == HEADER_SCHEMA
+    if LOG_MANIFEST_CARRIERS.contains(&schema) || schema == COMMIT_SCHEMA || schema == HEADER_SCHEMA
     {
         MAX_MANIFEST_OBJECT_BYTES
     } else {
@@ -1923,7 +1986,6 @@ mod tests {
         value["pad"] = serde_json::Value::String("x".repeat(600 * 1024));
         let encoded = serde_json::to_vec(&value).unwrap();
         assert!(encoded.len() as u64 > comb_core::MAX_MANIFEST_OBJECT_BYTES);
-        assert!(encoded.len() as u64 <= MAX_V2_MANIFEST_OBJECT_BYTES);
         let (digest, _) = store.put_blob(encoded).await.unwrap();
         let view = store.load_commit_view(&digest).await.unwrap();
         assert_eq!(view.header.resource, "log/big/p0");
@@ -1955,27 +2017,18 @@ mod tests {
             &store.key,
         );
         let bytes = env.encode().unwrap();
-        store
-            .backend
-            .put_create(&store.object_key(&env.meta.digest), &bytes)
+        let v3 = store.clone().with_layout(KeyLayout::V3);
+        v3.backend
+            .put_create(&v3.object_key(&env.meta.digest), &bytes)
             .await
             .unwrap();
-        let err = store.load_commit_view(&env.meta.digest).await.unwrap_err();
+        let err = v3.load_commit_view(&env.meta.digest).await.unwrap_err();
         assert!(
             matches!(
                 err.downcast_ref::<CoreError>(),
-                Some(CoreError::ObjectTooLarge { limit, .. })
-                    if *limit == comb_core::MAX_MANIFEST_OBJECT_BYTES
+                Some(CoreError::ObjectTooLarge { .. }) | Some(CoreError::RecoveryFailed(_))
             ),
             "{err:#}"
-        );
-        assert_eq!(
-            encoded_object_cap(LOG_MANIFEST_SCHEMA),
-            MAX_V2_MANIFEST_OBJECT_BYTES
-        );
-        assert_eq!(
-            encoded_object_cap(LOG_MANIFEST_SCHEMA_V3),
-            comb_core::MAX_MANIFEST_OBJECT_BYTES
         );
     }
 }

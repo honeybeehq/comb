@@ -1,6 +1,6 @@
 use crate::publish::{
     map_commit_read_error, HeadSnapshot, PrepareCtx, PreparedMutation, Published, RefMutationPlan,
-    LOG_MANIFEST_CARRIERS, MAX_V2_MANIFEST_OBJECT_BYTES,
+    LOG_MANIFEST_CARRIERS,
 };
 use anyhow::Result;
 use comb_core::error::CoreError;
@@ -374,6 +374,27 @@ impl Store {
                 ReleasePlan {
                     name: name.to_string(),
                     fence,
+                    writer: None,
+                },
+            )
+            .await?;
+        Ok(published.into())
+    }
+
+    pub(crate) async fn release_owned(
+        &self,
+        op: OperationId,
+        name: &str,
+        writer: &str,
+        fence: u64,
+    ) -> Result<MutationOutcome> {
+        let published = self
+            .publish(
+                OpIdentity::Generic(op),
+                ReleasePlan {
+                    name: name.to_string(),
+                    fence,
+                    writer: Some(writer.to_string()),
                 },
             )
             .await?;
@@ -450,24 +471,33 @@ async fn reject_existing_log_manifest(store: &Store, current: &RefValue) -> Resu
     let Some(digest) = current.target.as_ref() else {
         return Ok(());
     };
-    let spec = EnvelopeReadSpec {
-        tenant: &store.tenant,
-        kind: ObjectKind::Blob,
-        allowed_schemas: LOG_MANIFEST_CARRIERS,
-        max_encoded_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
-        max_plaintext_bytes: NonZeroU64::new(MAX_V2_MANIFEST_OBJECT_BYTES).expect("nonzero"),
-    };
-    let (payload, _) = match store.get_blob_limited(digest, spec).await {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(CoreError::UnsupportedEnvelopeFormat {
-                field: EnvelopeFormatField::Schema,
-                ..
-            }) = e.downcast_ref()
-            {
-                return Ok(());
+    let payload = if store.layout == KeyLayout::V2 {
+        match store.get_blob(digest).await {
+            Ok((p, _)) => p,
+            Err(e) => return Err(map_commit_read_error(digest, e)),
+        }
+    } else {
+        let spec = EnvelopeReadSpec {
+            tenant: &store.tenant,
+            kind: ObjectKind::Blob,
+            allowed_schemas: LOG_MANIFEST_CARRIERS,
+            max_encoded_bytes: NonZeroU64::new(comb_core::MAX_MANIFEST_OBJECT_BYTES)
+                .expect("nonzero"),
+            max_plaintext_bytes: NonZeroU64::new(comb_core::MAX_MANIFEST_OBJECT_BYTES)
+                .expect("nonzero"),
+        };
+        match store.get_blob_limited(digest, spec).await {
+            Ok((p, _)) => p,
+            Err(e) => {
+                if let Some(CoreError::UnsupportedEnvelopeFormat {
+                    field: EnvelopeFormatField::Schema,
+                    ..
+                }) = e.downcast_ref()
+                {
+                    return Ok(());
+                }
+                return Err(map_commit_read_error(digest, e));
             }
-            return Err(map_commit_read_error(digest, e));
         }
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
@@ -623,6 +653,7 @@ impl RefMutationPlan for ClaimPlan {
 struct ReleasePlan {
     name: String,
     fence: u64,
+    writer: Option<String>,
 }
 
 impl RefMutationPlan for ReleasePlan {
@@ -648,6 +679,19 @@ impl RefMutationPlan for ReleasePlan {
                 live: current.epoch,
             }
             .into());
+        }
+        if let Some(writer) = &self.writer {
+            match current.lease.as_ref() {
+                Some(lease) if lease.writer == *writer => {}
+                Some(_) => {
+                    return Err(CoreError::Rejected("release by non-owner".into()).into());
+                }
+                None => {
+                    return Err(
+                        CoreError::Rejected("release requires the held lease".into()).into(),
+                    );
+                }
+            }
         }
         let mut next = current.clone();
         next.generation = ctx.generation;
@@ -986,7 +1030,7 @@ mod limited_reads {
         use comb_core::HEADER_SCHEMA;
 
         let mem = Arc::new(MemoryBackend::new());
-        let store = store_with_cache(mem.clone(), None);
+        let store = store_with_cache(mem.clone(), None).with_layout(KeyLayout::V3);
         let op = store.mint_operation();
         let header = CommitHeader {
             schema: HEADER_SCHEMA.into(),
@@ -1025,7 +1069,7 @@ mod limited_reads {
             .unwrap();
 
         let fp = Arc::new(FailpointBackend::io_on_next_get_limited(mem, "/objects/"));
-        let fenced = store_with_cache(fp, None);
+        let fenced = store_with_cache(fp, None).with_layout(KeyLayout::V3);
         let other = store.key.digest(b"other");
         let err = fenced.set_target("owned", other, None).await.unwrap_err();
         assert!(

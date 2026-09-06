@@ -356,6 +356,9 @@ impl CompleteFeed {
         logical: String,
         call: &CallContext,
     ) -> Result<Self, OpenLogError> {
+        if let Some(e) = open_terminal(call) {
+            return Err(e);
+        }
         let resource = format!("log/{logical}/p0");
         let v3 = Arc::new((*store).clone().with_layout(KeyLayout::V3));
         let feed = Self {
@@ -395,12 +398,7 @@ impl CompleteFeed {
                 }
             }
             Some(head) => {
-                if let Some(digest) = head.value.target {
-                    let _ = feed.load_manifest(&digest, call).await?;
-                } else if head.value.generation > 0 {
-                    feed.reject_empty_target_with_manifest(&head.value, call)
-                        .await?;
-                }
+                let _ = feed.published_or_empty(&head.value, call).await?;
             }
         }
         Ok(feed)
@@ -466,30 +464,43 @@ impl CompleteFeed {
                 "complete feed requires complete retention".into(),
             )));
         }
+        if manifest.header.epoch != manifest.epoch {
+            return Err(OpenLogError::Integrity(LogIntegrityError(
+                "manifest epoch disagrees with its commit header".into(),
+            )));
+        }
+        match &manifest.catalog {
+            CatalogState::Empty if manifest.head_seq != 0 => {
+                return Err(OpenLogError::Integrity(LogIntegrityError(
+                    "empty catalog with nonzero head_seq".into(),
+                )));
+            }
+            CatalogState::Root { root } if root.last_seq != manifest.head_seq => {
+                return Err(OpenLogError::Integrity(LogIntegrityError(
+                    "catalog last_seq disagrees with manifest head_seq".into(),
+                )));
+            }
+            _ => {}
+        }
         Ok(manifest)
     }
 
-    async fn reject_empty_target_with_manifest(
+    async fn published_or_empty(
         &self,
         value: &RefValue,
         call: &CallContext,
-    ) -> Result<(), OpenLogError> {
+    ) -> Result<Option<CompleteLogManifest>, OpenLogError> {
+        if let Some(digest) = &value.target {
+            return Ok(Some(self.load_manifest(digest, call).await?));
+        }
         let Some(commit) = &value.head_commit else {
-            return Ok(());
+            return Ok(None);
         };
-        let spec = EnvelopeReadSpec {
-            tenant: &self.store.tenant,
-            kind: ObjectKind::Blob,
-            allowed_schemas: MANIFEST_SCHEMAS,
-            max_encoded_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
-            max_plaintext_bytes: NonZeroU64::new(MAX_MANIFEST_OBJECT_BYTES).unwrap(),
-        };
-        match timed(call, self.store.get_blob_limited(commit, spec)).await {
-            Ok(_) => Err(OpenLogError::Integrity(LogIntegrityError(
-                "existing ref has a v3 manifest commit but no target".into(),
-            ))),
-            Err(OpenLogError::UnsupportedManifestSchema { .. }) => Ok(()),
-            Err(OpenLogError::Integrity(_)) => Ok(()),
+        match timed(call, self.store.load_commit_view(commit)).await {
+            Ok(view) if view.target_follows_commit => Err(OpenLogError::Integrity(
+                LogIntegrityError("existing ref has a published log commit but no target".into()),
+            )),
+            Ok(_) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -516,6 +527,9 @@ pub trait LogReader: Send + Sync {
 #[async_trait]
 impl LogReader for CompleteFeed {
     async fn head(&self, call: &CallContext) -> Result<CompleteFeedHead, ReadError> {
+        if let Some(e) = read_terminal(call) {
+            return Err(e);
+        }
         let snapshot = timed(call, self.store.read_head(&self.resource))
             .await
             .map_err(open_to_read)?;
@@ -527,17 +541,13 @@ impl LogReader for CompleteFeed {
                 trim_before_seq: 0,
             },
             Some(h) => {
-                let (head_seq, trim_before_seq) = if let Some(d) = &h.value.target {
-                    let m = self.load_manifest(d, call).await.map_err(open_to_read)?;
-                    if m.epoch != h.value.epoch {
-                        return Err(ReadError::Integrity(LogIntegrityError(format!(
-                            "manifest epoch {} disagrees with ref {}",
-                            m.epoch, h.value.epoch
-                        ))));
-                    }
-                    (m.head_seq, m.trim_before_seq)
-                } else {
-                    (0, 0)
+                let (head_seq, trim_before_seq) = match self
+                    .published_or_empty(&h.value, call)
+                    .await
+                    .map_err(open_to_read)?
+                {
+                    Some(m) => (m.head_seq, m.trim_before_seq),
+                    None => (0, 0),
                 };
                 CompleteFeedHead {
                     generation: h.value.generation,
@@ -558,6 +568,9 @@ impl LogReader for CompleteFeed {
         limits: ReadLimits,
         call: &CallContext,
     ) -> Result<ReadPage, ReadError> {
+        if let Some(e) = read_terminal(call) {
+            return Err(e);
+        }
         if cursor.partition != 0 {
             return Err(ReadError::InvalidCursor {
                 requested: cursor,
@@ -575,9 +588,10 @@ impl LogReader for CompleteFeed {
                     });
                     let sleep = tokio::time::sleep(delay);
                     tokio::select! {
-                        _ = sleep => {}
+                        biased;
                         _ = call.cancellation.cancelled() => return Err(ReadError::Cancelled),
                         _ = tokio::time::sleep_until(call.deadline) => return Err(ReadError::DeadlineExceeded),
+                        _ = sleep => {}
                     }
                     delay = (delay * 2).min(Duration::from_millis(400));
                 }
@@ -609,8 +623,7 @@ impl LogReader for CompleteFeed {
         };
         loop {
             tokio::select! {
-                _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                biased;
                 _ = call.cancellation.cancelled() => return Err(ReadError::Cancelled),
                 _ = tokio::time::sleep_until(deadline) => {
                     if tokio::time::Instant::now() >= wait_until {
@@ -618,6 +631,8 @@ impl LogReader for CompleteFeed {
                     }
                     return Err(ReadError::DeadlineExceeded);
                 }
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
             }
             let page = self.read_page(cursor, limits, &follow_call).await?;
             if !page.events.is_empty() {
@@ -643,6 +658,9 @@ impl CompleteFeed {
         limits: ReadLimits,
         call: &CallContext,
     ) -> Result<ReadPage, ReadError> {
+        if let Some(e) = read_terminal(call) {
+            return Err(e);
+        }
         let snapshot = timed_read(call, self.store.read_head(&self.resource), "read_head").await?;
         let Some(head) = snapshot else {
             if cursor.next_seq == 1 {
@@ -660,6 +678,9 @@ impl CompleteFeed {
             });
         };
         let Some(digest) = &head.value.target else {
+            self.published_or_empty(&head.value, call)
+                .await
+                .map_err(open_to_read)?;
             if cursor.next_seq == 1 {
                 return Ok(ReadPage {
                     events: Vec::new(),
@@ -678,12 +699,6 @@ impl CompleteFeed {
             .load_manifest(digest, call)
             .await
             .map_err(open_to_read)?;
-        if manifest.epoch != head.value.epoch {
-            return Err(ReadError::Integrity(LogIntegrityError(format!(
-                "manifest epoch {} disagrees with ref {}",
-                manifest.epoch, head.value.epoch
-            ))));
-        }
         let head_seq = manifest.head_seq;
         let at_head_seq = checked_next(head_seq, "snapshot head")?;
         let at_head_cursor = Cursor {
@@ -927,7 +942,18 @@ impl WriterSession {
     }
 
     async fn acquire(&self, call: &CallContext) -> Result<u64, LeaseError> {
-        let _guard = self.acquire.lock().await;
+        if let Some(e) = lease_terminal(call) {
+            return Err(e);
+        }
+        let _guard = tokio::select! {
+            biased;
+            _ = call.cancellation.cancelled() => return Err(LeaseError::Cancelled),
+            _ = tokio::time::sleep_until(call.deadline) => return Err(LeaseError::DeadlineExceeded),
+            g = self.acquire.lock() => g,
+        };
+        if let Some(e) = lease_terminal(call) {
+            return Err(e);
+        }
         if let Some(epoch) = self.active_epoch()? {
             return Ok(epoch);
         }
@@ -988,11 +1014,12 @@ impl WriterSession {
                 }
                 Err(LeaseError::LeaseHeld { owner, until }) => {
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                        biased;
                         _ = acquire_call.cancellation.cancelled() => return Err(LeaseError::Cancelled),
                         _ = tokio::time::sleep_until(deadline) => {
                             return Err(LeaseError::LeaseHeld { owner, until });
                         }
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
                     }
                 }
                 Err(e) => return Err(e),
@@ -1064,13 +1091,31 @@ impl WriterSession {
         let state = self.state.clone();
         *slot = Some(tokio::spawn(async move {
             let ttl = policy.ttl.as_secs().max(1) as i64;
+            let slack = chrono::Duration::from_std(policy.clock_slack)
+                .unwrap_or_else(|_| chrono::Duration::seconds(0));
             loop {
                 tokio::time::sleep(policy.renew_every).await;
-                match &*state.borrow() {
-                    WriterState::Active { epoch: e, .. } if *e == epoch => {}
+                let now = store.clock().now();
+                let st = state.borrow().clone();
+                match st {
+                    WriterState::Active {
+                        epoch: e,
+                        lease_until,
+                    } if e == epoch => {
+                        if lease_until <= now + slack {
+                            let _ = state.send(WriterState::Lost {
+                                epoch: Some(epoch),
+                                cause: SessionLoss::LeaseExpired,
+                            });
+                            return;
+                        }
+                    }
                     _ => return,
                 }
-                match store.renew_lease(&resource, epoch, ttl).await {
+                match store
+                    .renew_owned_lease(&resource, &instance, epoch, ttl)
+                    .await
+                {
                     Ok(value) => {
                         let Some(lease) = value.lease.as_ref() else {
                             let _ = state.send(WriterState::Lost {
@@ -1096,6 +1141,12 @@ impl WriterSession {
                             Some(CoreError::Fenced { live, .. }) => {
                                 SessionLoss::Fenced { live_epoch: *live }
                             }
+                            Some(CoreError::Rejected(m)) if m.contains("expired") => {
+                                SessionLoss::LeaseExpired
+                            }
+                            Some(CoreError::Rejected(m)) if m.contains("owner") => {
+                                SessionLoss::OwnerChanged
+                            }
                             _ => SessionLoss::RenewalUncertain,
                         };
                         let _ = state.send(WriterState::Lost {
@@ -1117,6 +1168,13 @@ impl WriterSession {
     ) -> Result<StableAppendReceipt, StableAppendError> {
         if payload.is_empty() || payload.len() as u64 > MAX_CHUNK_RAW_BYTES {
             return Err(StableAppendError::InvalidInput);
+        }
+        if let Some(e) = lease_terminal(call) {
+            return Err(match e {
+                LeaseError::Cancelled => StableAppendError::Cancelled,
+                LeaseError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+                other => StableAppendError::Lease(other),
+            });
         }
         let payload_hash = StableKey::payload_hash(&self.feed.store.key, &payload);
         for _ in 0..32 {
@@ -1185,6 +1243,16 @@ impl WriterSession {
                     }
                     Lookup::Absent => {}
                 }
+            } else {
+                self.feed
+                    .published_or_empty(&snapshot.value, call)
+                    .await
+                    .map_err(|e| match e {
+                        OpenLogError::Integrity(i) => StableAppendError::Integrity(i),
+                        OpenLogError::DeadlineExceeded => StableAppendError::DeadlineExceeded,
+                        OpenLogError::Cancelled => StableAppendError::Cancelled,
+                        _ => StableAppendError::Unavailable,
+                    })?;
             }
             let epoch = self.acquire(call).await.map_err(StableAppendError::Lease)?;
             let snapshot = timed_lease(call, self.feed.store.read_head(&self.feed.resource))
@@ -1260,7 +1328,12 @@ impl WriterSession {
         let op = self.feed.store.mint_operation();
         let result = timed_lease(
             call,
-            self.feed.store.release(op, &self.feed.resource, epoch),
+            self.feed.store.release_owned(
+                op,
+                &self.feed.resource,
+                &self.instance.canonical(),
+                epoch,
+            ),
         )
         .await;
         let _ = self.state.send(WriterState::Closed);
@@ -1278,10 +1351,17 @@ async fn timed_cas<T>(
     call: &CallContext,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, StableAppendError> {
+    if call.cancellation.is_cancelled() {
+        return Err(StableAppendError::Cancelled);
+    }
+    if tokio::time::Instant::now() >= call.deadline {
+        return Err(StableAppendError::DeadlineExceeded);
+    }
     tokio::select! {
-        r = fut => r.map_err(cas_from_anyhow),
+        biased;
         _ = call.cancellation.cancelled() => Err(StableAppendError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(StableAppendError::DeadlineExceeded),
+        r = fut => r.map_err(cas_from_anyhow),
     }
 }
 
@@ -1356,6 +1436,15 @@ impl RefMutationPlan for CompleteAppendPlan {
             return Err(CoreError::Rejected("event exceeds chunk raw cap".into()).into());
         }
         let (mut catalog, mut index, mut head_seq) = if current.target.is_none() {
+            if let Some(commit) = &current.head_commit {
+                let view = ctx.store.load_commit_view(commit).await?;
+                if view.target_follows_commit {
+                    return Err(CoreError::IntegrityError(
+                        "existing ref has a published log commit but no target".into(),
+                    )
+                    .into());
+                }
+            }
             (
                 CatalogState::Empty,
                 hamt::empty_root(ctx.store).await?,
@@ -1529,14 +1618,48 @@ impl RefMutationPlan for CompleteAppendPlan {
     }
 }
 
+fn open_terminal(call: &CallContext) -> Option<OpenLogError> {
+    if call.cancellation.is_cancelled() {
+        Some(OpenLogError::Cancelled)
+    } else if tokio::time::Instant::now() >= call.deadline {
+        Some(OpenLogError::DeadlineExceeded)
+    } else {
+        None
+    }
+}
+
+fn read_terminal(call: &CallContext) -> Option<ReadError> {
+    if call.cancellation.is_cancelled() {
+        Some(ReadError::Cancelled)
+    } else if tokio::time::Instant::now() >= call.deadline {
+        Some(ReadError::DeadlineExceeded)
+    } else {
+        None
+    }
+}
+
+fn lease_terminal(call: &CallContext) -> Option<LeaseError> {
+    if call.cancellation.is_cancelled() {
+        Some(LeaseError::Cancelled)
+    } else if tokio::time::Instant::now() >= call.deadline {
+        Some(LeaseError::DeadlineExceeded)
+    } else {
+        None
+    }
+}
+
 async fn timed<T>(
     call: &CallContext,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, OpenLogError> {
+    if let Some(e) = open_terminal(call) {
+        return Err(e);
+    }
     tokio::select! {
-        r = fut => r.map_err(open_from_anyhow),
+        biased;
         _ = call.cancellation.cancelled() => Err(OpenLogError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(OpenLogError::DeadlineExceeded),
+        r = fut => r.map_err(open_from_anyhow),
     }
 }
 
@@ -1545,10 +1668,14 @@ async fn timed_read<T>(
     fut: impl std::future::Future<Output = Result<T>>,
     operation: &'static str,
 ) -> Result<T, ReadError> {
+    if let Some(e) = read_terminal(call) {
+        return Err(e);
+    }
     tokio::select! {
-        r = fut => r.map_err(|e| read_from_anyhow(e, operation)),
+        biased;
         _ = call.cancellation.cancelled() => Err(ReadError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(ReadError::DeadlineExceeded),
+        r = fut => r.map_err(|e| read_from_anyhow(e, operation)),
     }
 }
 
@@ -1556,10 +1683,14 @@ async fn timed_lease<T>(
     call: &CallContext,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T, LeaseError> {
+    if let Some(e) = lease_terminal(call) {
+        return Err(e);
+    }
     tokio::select! {
-        r = fut => r.map_err(lease_from_anyhow),
+        biased;
         _ = call.cancellation.cancelled() => Err(LeaseError::Cancelled),
         _ = tokio::time::sleep_until(call.deadline) => Err(LeaseError::DeadlineExceeded),
+        r = fut => r.map_err(lease_from_anyhow),
     }
 }
 

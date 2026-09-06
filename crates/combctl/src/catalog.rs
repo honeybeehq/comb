@@ -145,6 +145,19 @@ fn validate_children(children: &[CatalogChild], height: u8) -> Result<()> {
     Ok(())
 }
 
+fn map_catalog_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<CoreError>() {
+        Ok(CoreError::BackendUnavailable(m)) => {
+            CoreError::BackendUnavailable(format!("catalog node {digest}: {m}")).into()
+        }
+        Ok(CoreError::Io(io)) => {
+            CoreError::BackendUnavailable(format!("catalog node {digest}: {io}")).into()
+        }
+        Ok(other) => other.into(),
+        Err(e) => CoreError::IntegrityError(format!("catalog node {digest}: {e:#}")).into(),
+    }
+}
+
 async fn put_node(store: &Store, node: &CatalogNode) -> Result<Digest> {
     match node {
         CatalogNode::Leaf { refs, .. } => validate_leaf_refs(refs)?,
@@ -167,7 +180,7 @@ async fn load_node(store: &Store, digest: &Digest) -> Result<CatalogNode> {
     let (payload, _) = store
         .get_blob_limited(digest, spec(&store.tenant))
         .await
-        .map_err(|e| CoreError::IntegrityError(format!("catalog node {digest}: {e:#}")))?;
+        .map_err(|e| map_catalog_read_error(digest, e))?;
     let node: CatalogNode = serde_json::from_slice(&payload).map_err(|e| {
         CoreError::IntegrityError(format!("catalog node {digest} is malformed: {e}"))
     })?;
