@@ -90,3 +90,11 @@ N1 remains a recorded bounded cost, not a reason to add physical stable grouping
 The opt-in backend_drills test at52c1963 made clean duplicate calls despite its lost-reply name. Root requested a separate followup using the existing typed final-ref-CAS failpoint for Core C4, Log L2 and stable append on each selected backend. Live backend recovery is not yet verified by that test.
 
 R2 worker3311b020-3aa4-45b6-bae4-9acc0fbcedf1 starts bounded backend/envelope work in comb-reliable-log-r2 from052ca11. It must receive the R1 followup before editing log/publication code. Foundation storage capabilities remain false pending bounded reads, renewable sessions and actual process acceptance.
+
+## Verified followup and CI
+
+The owner reran the full workspace test suite, build and clippy after `a675d38` using `comb-reliable-log-r1/target`. Tests passed, including14library and26retry drills plus Foundation bridge tests. Clippy completed with the reported Foundation or existing warnings. This is owner execution evidence.
+
+Root independently checked GitHub run34024758854 at `db41bce`, which includes `a675d38`, the committed bridge compatibility changes and R2 handoff. It passed workspace all-target tests and lint, plus the Foundation Node checks. The actual parent of `a675d38` is `bfba9a0`; the earlier owner message naming52c1963 as its direct parent was stale. The root worktree was clean when checked.
+
+The only remaining R1-owner task is replacing clean duplicate calls in the opt-in backend drill with an asserted after-success final-CAS reply loss. R2 implementation is active in its isolated worktree.
