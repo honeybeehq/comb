@@ -1,0 +1,273 @@
+//! Protocol parse/validate and handler seam against an in-memory store.
+
+#[path = "../src/bridge/mod.rs"]
+mod bridge;
+
+use bridge::handler::Bridge;
+use bridge::limits::Limits;
+use bridge::protocol::{
+    extract_id, parse_payload_hex, parse_request, seq_string, ErrorCode, Response,
+};
+use comb_core::DigestKey;
+use comb_object::memory::MemoryBackend;
+use combctl::store::Store;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+fn limits() -> Limits {
+    Limits::default()
+}
+
+fn parse(v: Value) -> Result<bridge::protocol::Request, Response> {
+    parse_request(&serde_json::to_vec(&v).unwrap(), &limits())
+}
+
+fn parse_err(v: Value) -> Value {
+    match parse(v) {
+        Err(resp) => serde_json::from_str(&resp.to_jsonl()).unwrap(),
+        Ok(_) => panic!("expected parse error"),
+    }
+}
+
+fn mem_bridge() -> Bridge {
+    Bridge::new(
+        Store {
+            backend: Arc::new(MemoryBackend::new()),
+            tenant: "org_t".into(),
+            key: DigestKey::from_bytes([5u8; 32]),
+            cache_dir: None,
+        },
+        "comb-bridge".into(),
+        60,
+        Limits::default(),
+    )
+}
+
+async fn rpc(bridge: &Bridge, v: Value) -> Value {
+    let resp = bridge.handle_frame(&serde_json::to_vec(&v).unwrap()).await;
+    serde_json::from_str(&resp.to_jsonl()).unwrap()
+}
+
+#[test]
+fn hello_and_unknown_version() {
+    parse(json!({"v":1,"id":"h","op":"hello"})).unwrap();
+    let err = parse_err(json!({"v":2,"id":"h","op":"hello"}));
+    assert_eq!(err["ok"], false);
+    assert_eq!(err["id"], "h");
+    assert_eq!(err["error"]["code"], "unsupported");
+    assert_eq!(err["error"]["capability"], "protocol");
+}
+
+#[test]
+fn unknown_op_is_invalid_request() {
+    let err = parse_err(json!({"v":1,"id":"x","op":"trim"}));
+    assert_eq!(err["id"], "x");
+    assert_eq!(err["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn append_requires_top_level_key_and_single_payload() {
+    let err = parse_err(json!({"v":1,"id":"a","op":"append","log":"doc","payload_hex":"00"}));
+    assert_eq!(err["id"], "a");
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k",
+        "events":[{"payload_hex":"00"}]
+    }));
+    assert_eq!(err["id"], "a");
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    parse(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"doc:hash","payload_hex":"00ff"
+    }))
+    .unwrap();
+}
+
+#[test]
+fn rejects_invalid_hex_empty_payload_and_bad_names() {
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k","payload_hex":"zz"
+    }));
+    assert_eq!(err["id"], "a");
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"doc","idempotency_key":"k","payload_hex":"abc"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"../etc","idempotency_key":"k","payload_hex":"00"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({
+        "v":1,"id":"a","op":"append","log":"a/b","idempotency_key":"k","payload_hex":"00"
+    }));
+    assert_eq!(err["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn cursor_must_be_decimal_string() {
+    let err = parse_err(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":1}));
+    assert_eq!(err["id"], "r");
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":"0"}));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    let err = parse_err(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":"01"}));
+    assert_eq!(err["error"]["code"], "invalid_request");
+
+    parse(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":"1"})).unwrap();
+    parse(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":"18446744073709551615"})).unwrap();
+    let err =
+        parse_err(json!({"v":1,"id":"r","op":"read","log":"doc","cursor":"18446744073709551616"}));
+    assert_eq!(err["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn payload_hex_roundtrips_arbitrary_bytes() {
+    let bytes: Vec<u8> = (0u8..=255).collect();
+    let hex = hex::encode(&bytes);
+    let (normalized, decoded) = parse_payload_hex(&hex).unwrap();
+    assert_eq!(normalized, hex);
+    assert_eq!(decoded, bytes);
+    let (from_upper, decoded_upper) = parse_payload_hex(&hex.to_uppercase()).unwrap();
+    assert_eq!(from_upper, hex);
+    assert_eq!(decoded_upper, bytes);
+}
+
+#[test]
+fn seq_strings_are_decimal() {
+    assert_eq!(seq_string(0), "0");
+    assert_eq!(seq_string(1), "1");
+    assert_eq!(seq_string(u64::MAX), "18446744073709551615");
+}
+
+#[test]
+fn malformed_json_keeps_id_when_present() {
+    let err = match parse_request(br#"{"v":1,"id":"keep-me","op":"hello" trailing"#, &limits()) {
+        Err(resp) => serde_json::from_str::<Value>(&resp.to_jsonl()).unwrap(),
+        Ok(_) => panic!("expected error"),
+    };
+    assert_eq!(err["error"]["code"], "invalid_request");
+    assert_eq!(err["id"], "keep-me");
+    assert_eq!(extract_id(br#"{"v":1,"id":"x","op":"hello""#), "x");
+}
+
+#[tokio::test]
+async fn hello_advertises_honest_capabilities() {
+    let b = mem_bridge();
+    let v = rpc(&b, json!({"v":1,"id":"h","op":"hello"})).await;
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["op"], "hello");
+    assert_eq!(v["protocol"], 1);
+    assert_eq!(v["capabilities"]["durable_idempotency"], false);
+    assert_eq!(v["capabilities"]["bounded_memory_read"], false);
+    assert_eq!(v["capabilities"]["payload_hex"], true);
+    assert_eq!(v["limits"]["max_append_events"], 1);
+    assert!(v["limits"]["max_frame_bytes"].as_u64().unwrap() > 0);
+    assert!(v["limits"]["max_append_bytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn hello_require_unavailable_is_unsupported() {
+    let b = mem_bridge();
+    let v = rpc(
+        &b,
+        json!({"v":1,"id":"h","op":"hello","require":["durable_idempotency"]}),
+    )
+    .await;
+    assert_eq!(v["id"], "h");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "unsupported");
+    assert_eq!(v["error"]["capability"], "durable_idempotency");
+}
+
+#[tokio::test]
+async fn keyed_append_is_unsupported_and_does_not_append() {
+    let b = mem_bridge();
+    let v = rpc(
+        &b,
+        json!({
+            "v":1,
+            "id":"a",
+            "op":"append",
+            "log":"doc1",
+            "idempotency_key":"doc:hash",
+            "payload_hex":"00ff"
+        }),
+    )
+    .await;
+    assert_eq!(v["id"], "a");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "unsupported");
+    assert_eq!(v["error"]["capability"], "durable_idempotency");
+
+    let head = rpc(&b, json!({"v":1,"id":"h","op":"head","log":"doc1"})).await;
+    assert_eq!(head["id"], "h");
+    assert_eq!(head["ok"], true);
+    assert_eq!(head["head"], "0");
+}
+
+#[tokio::test]
+async fn read_and_follow_are_unsupported_and_keep_id() {
+    let b = mem_bridge();
+    let read = rpc(
+        &b,
+        json!({"v":1,"id":"r","op":"read","log":"doc1","cursor":"1"}),
+    )
+    .await;
+    assert_eq!(read["id"], "r");
+    assert_eq!(read["ok"], false);
+    assert_eq!(read["error"]["code"], "unsupported");
+    assert_eq!(read["error"]["capability"], "bounded_memory_read");
+
+    let follow = rpc(
+        &b,
+        json!({"v":1,"id":"f","op":"follow","log":"doc1","cursor":"1","timeout_ms":30}),
+    )
+    .await;
+    assert_eq!(follow["id"], "f");
+    assert_eq!(follow["ok"], false);
+    assert_eq!(follow["error"]["code"], "unsupported");
+    assert_eq!(follow["error"]["capability"], "bounded_memory_read");
+}
+
+#[test]
+fn error_code_wire_names() {
+    let json = serde_json::to_value(ErrorCode::EventTooLarge).unwrap();
+    assert_eq!(json, "event_too_large");
+    let json = serde_json::to_value(ErrorCode::UnknownOperation).unwrap();
+    assert_eq!(json, "unknown_operation");
+}
+
+#[tokio::test]
+async fn fixture_shaped_append_is_unsupported() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/testing/fixtures/foundation-bridge.json");
+    if !path.exists() {
+        return;
+    }
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let fixture: Value = serde_json::from_str(&raw).unwrap();
+    let b = mem_bridge();
+    let change = &fixture["changes"][0];
+    let v = rpc(
+        &b,
+        json!({
+            "v":1,
+            "id":"a0",
+            "op":"append",
+            "log":"foundation",
+            "idempotency_key": change["idempotency_key"],
+            "payload_hex": change["payload_hex"]
+        }),
+    )
+    .await;
+    assert_eq!(v["id"], "a0");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["capability"], "durable_idempotency");
+}
