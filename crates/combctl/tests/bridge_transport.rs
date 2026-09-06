@@ -31,12 +31,12 @@ fn unix_pair() -> (OwnedReadHalf, OwnedWriteHalf, OwnedReadHalf, OwnedWriteHalf)
 
 fn mem_bridge(limits: Limits) -> Arc<Bridge> {
     Arc::new(Bridge::new(
-        Store {
-            backend: Arc::new(MemoryBackend::new()),
-            tenant: "org_t".into(),
-            key: DigestKey::from_bytes([5u8; 32]),
-            cache_dir: None,
-        },
+        Store::new(
+            Arc::new(MemoryBackend::new()),
+            "org_t",
+            DigestKey::from_bytes([5u8; 32]),
+            None,
+        ),
         "comb-bridge".into(),
         60,
         limits,

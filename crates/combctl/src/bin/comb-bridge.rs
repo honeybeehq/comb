@@ -80,12 +80,7 @@ async fn run() -> Result<()> {
             Some(dir.join("cache")),
         ),
     };
-    let store = Store {
-        backend,
-        tenant: cfg.tenant.clone(),
-        key,
-        cache_dir,
-    };
+    let store = Store::new(backend, cfg.tenant.clone(), key, cache_dir);
     let bridge = Arc::new(Bridge::new(store, writer, cli.lease, Limits::default()));
     stdio::run(tokio::io::stdin(), tokio::io::stdout(), bridge).await
 }

@@ -31,12 +31,12 @@ fn parse_err(v: Value) -> Value {
 
 fn mem_bridge() -> Bridge {
     Bridge::new(
-        Store {
-            backend: Arc::new(MemoryBackend::new()),
-            tenant: "org_t".into(),
-            key: DigestKey::from_bytes([5u8; 32]),
-            cache_dir: None,
-        },
+        Store::new(
+            Arc::new(MemoryBackend::new()),
+            "org_t",
+            DigestKey::from_bytes([5u8; 32]),
+            None,
+        ),
         "comb-bridge".into(),
         60,
         Limits::default(),
@@ -121,21 +121,43 @@ fn maximum_raw_page_leaves_space_for_all_event_metadata() {
 
 #[tokio::test]
 async fn head_without_representable_next_cursor_returns_error() {
-    let store = Store {
-        backend: Arc::new(MemoryBackend::new()),
-        tenant: "org_head_overflow".into(),
-        key: DigestKey::from_bytes([7; 32]),
-        cache_dir: None,
-    };
+    let store = Store::new(
+        Arc::new(MemoryBackend::new()),
+        "org_head_overflow",
+        DigestKey::from_bytes([7; 32]),
+        None,
+    );
     let manifest = json!({
-        "schema":"comb.log.partition-manifest/v1", "log":"log/doc/p0",
+        "schema":combctl::log::MANIFEST_SCHEMA, "log":"log/doc/p0",
+        "header": {
+            "schema": comb_core::HEADER_SCHEMA,
+            "resource": "log/doc/p0", "generation": 1, "epoch": 0,
+            "identity": store.mint_operation().to_string(),
+            "request": store.key.digest(b"head-overflow-fixture"),
+            "parent": null, "skip": null, "at": chrono::Utc::now(),
+        },
         "epoch":0, "head_seq":u64::MAX, "chunks":[], "segments":[], "trim_before_seq":0,
+        "retention":"trimmable", "stable_index":null,
     });
     let (digest, _) = store
         .put_blob(serde_json::to_vec(&manifest).unwrap())
         .await
         .unwrap();
-    store.set_target("log/doc/p0", digest, None).await.unwrap();
+    // Seed malformed storage through the test backend. Core mutations must
+    // not bypass Log ownership just to construct this boundary fixture.
+    let mut head = comb_core::RefValue::new(&store.tenant, "log/doc/p0");
+    head.generation = 1;
+    head.target = Some(digest.clone());
+    head.head_commit = Some(digest);
+    store
+        .backend
+        .put_update(
+            &store.ref_key("log/doc/p0"),
+            None,
+            &serde_json::to_vec(&head).unwrap(),
+        )
+        .await
+        .unwrap();
     let bridge = Bridge::new(store, "test-writer".into(), 60, limits());
     let response = rpc(
         &bridge,
@@ -145,6 +167,10 @@ async fn head_without_representable_next_cursor_returns_error() {
     assert_eq!(response["id"], "head-overflow");
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "backend_unavailable");
+    assert_eq!(
+        response["error"]["message"],
+        "log head has no representable next cursor"
+    );
     assert!(response.get("cursor").is_none());
 }
 
