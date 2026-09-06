@@ -536,6 +536,10 @@ fn map_node_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
         Ok(CoreError::Io(io)) => {
             CoreError::BackendUnavailable(format!("stable index node {digest}: {io}")).into()
         }
+        Ok(CoreError::ObjectTooLarge { limit, actual, .. }) => CoreError::IntegrityError(format!(
+            "stable index node {digest} exceeds encoded cap {limit} actual {actual:?}"
+        ))
+        .into(),
         Ok(e @ (CoreError::IntegrityError(_) | CoreError::InvalidFormat(_))) => e.into(),
         Ok(other) => CoreError::RecoveryFailed(format!(
             "unclassified stable index node error {digest}: {other}"
@@ -989,7 +993,7 @@ mod tests {
             .await
             .unwrap();
         let io_store = Store::new(
-            Arc::new(FailpointBackend::io_on_next_get(mem, "/objects/")),
+            Arc::new(FailpointBackend::io_on_next_get_limited(mem, "/objects/")),
             "org_t",
             DigestKey::from_bytes([9u8; 32]),
             None,
