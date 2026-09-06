@@ -1,0 +1,216 @@
+review_2100_refs_preserve_every_child_height.txt
+
+running 1 test
+test catalog::parent_review::review_2100_refs_preserve_every_child_height ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 28.36s
+
+
+review_acquisition_mutex_wait_honors_deadline.txt
+
+running 1 test
+test review_acquisition_mutex_wait_honors_deadline ... 
+thread 'review_acquisition_mutex_wait_honors_deadline' (58151523) panicked at crates/combctl/tests/r2_parent_review.rs:358:5:
+mutex ignored caller deadline: Err(Elapsed(()))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_acquisition_mutex_wait_honors_deadline
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.22s
+
+
+review_cancelled_read_is_cancelled.txt
+
+running 1 test
+test review_cancelled_read_is_cancelled ... 
+thread 'review_cancelled_read_is_cancelled' (58151524) panicked at crates/combctl/tests/r2_parent_review.rs:49:5:
+assertion failed: matches!(feed.read_page(Cursor::first(0), limits(), &c).await,
+    Err(ReadError::Cancelled))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_cancelled_read_is_cancelled
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+review_existing_v3_survives_later_v1_ref.txt
+
+running 1 test
+test review_existing_v3_survives_later_v1_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+
+
+review_expired_read_is_deadline_exceeded.txt
+
+running 1 test
+test review_expired_read_is_deadline_exceeded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+review_foreign_manifest_is_not_replayed.txt
+
+running 1 test
+test review_foreign_manifest_is_not_replayed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+
+
+review_idle_renewal_cannot_revive_expired_lease.txt
+
+running 1 test
+test review_idle_renewal_cannot_revive_expired_lease ... 
+thread 'review_idle_renewal_cannot_revive_expired_lease' (58151538) panicked at crates/combctl/tests/r2_parent_review.rs:316:5:
+expired lease was renewed back to Active: Active { epoch: 1, lease_until: 2026-09-06T11:51:48Z }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_idle_renewal_cannot_revive_expired_lease
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.36s
+
+
+review_manifest_head_cannot_hide_catalog_events.txt
+
+running 1 test
+test review_manifest_head_cannot_hide_catalog_events ... 
+thread 'review_manifest_head_cannot_hide_catalog_events' (58222530) panicked at crates/combctl/tests/r2_parent_review.rs:488:5:
+head concealed retained catalog events: Ok(ReadPage { events: [LogEvent { position: Position { partition: 0, seq: 1 }, committed_at: 2026-09-06T12:04:50.458866Z, payload: b"payload" }], next: Cursor { partition: 0, next_seq: 2 }, snapshot_head: 1, raw_payload_bytes: 7, at_head: true })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_manifest_head_cannot_hide_catalog_events
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.02s
+
+
+review_max_head_is_integrity_not_overflow.txt
+
+running 1 test
+test review_max_head_is_integrity_not_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+
+
+review_missing_committed_target_is_not_empty_feed.txt
+
+running 1 test
+test review_missing_committed_target_is_not_empty_feed ... 
+thread 'review_missing_committed_target_is_not_empty_feed' (58166584) panicked at crates/combctl/tests/r2_parent_review.rs:391:5:
+missing target after committed append became empty success
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_missing_committed_target_is_not_empty_feed
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s
+
+
+review_missing_target_cannot_reset_stable_identity.txt
+
+running 1 test
+test review_missing_target_cannot_reset_stable_identity ... 
+thread 'review_missing_target_cannot_reset_stable_identity' (58166591) panicked at crates/combctl/tests/r2_parent_review.rs:416:5:
+committed stable identity was reset: Ok(StableAppendReceipt { payload_hash: b3k:fff0dea20ed437986e5361c7e1123d5e90c10cf45ff4a9fcdeacac6bad55f1d4, range: AppendRange { first: 1, last: 1 }, generation: 3 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_missing_target_cannot_reset_stable_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s
+
+
+review_read_never_uses_unbounded_get.txt
+
+running 1 test
+test review_read_never_uses_unbounded_get ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+review_seek_rejects_depth_beyond_bound.txt
+
+running 1 test
+test catalog::parent_review::review_seek_rejects_depth_beyond_bound ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.01s
+
+
+review_seek_rejects_noncovering_leaf.txt
+
+running 1 test
+test catalog::parent_review::review_seek_rejects_noncovering_leaf ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.01s
+
+
+review_takeover_preserves_read_before_next_append.txt
+
+running 1 test
+test review_takeover_preserves_read_before_next_append ... 
+thread 'review_takeover_preserves_read_before_next_append' (58151570) panicked at crates/combctl/tests/r2_parent_review.rs:276:10:
+lease takeover must preserve replay: Integrity(LogIntegrityError("manifest epoch 1 disagrees with ref 2"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_takeover_preserves_read_before_next_append
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+
+
+review_transient_catalog_read_recovers.txt
+
+running 1 test
+test review_transient_catalog_read_recovers ... 
+thread 'review_transient_catalog_read_recovers' (58206346) panicked at crates/combctl/tests/r2_parent_review.rs:463:10:
+transient catalog read should recover: Integrity(LogIntegrityError("catalog node b3k:1083633c70bf4662bb69be29f58e63cb4dc09fe92da6a3efec44880ea20a4df8: backend unavailable: injected: get_limited request lost"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_transient_catalog_read_recovers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.07s
+
+
+review_transient_manifest_read_recovers.txt
+
+running 1 test
+test review_transient_manifest_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.04s
+
+
+review_unacquired_close_completes.txt
+
+running 1 test
+test review_unacquired_close_completes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
