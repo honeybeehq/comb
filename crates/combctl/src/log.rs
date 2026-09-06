@@ -831,6 +831,7 @@ async fn prepare_events(
     next.updated_at = now;
     let mut ref_state = next.clone();
     ref_state.head_commit = None;
+    ref_state.target = None;
     let manifest = LogManifest {
         schema: MANIFEST_SCHEMA.into(),
         header: header.clone(),

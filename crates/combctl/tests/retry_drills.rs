@@ -412,8 +412,7 @@ async fn applied_retry_keeps_original_generation_and_epoch() {
     assert_eq!(again.generation, first.generation);
     assert_eq!(again.epoch, first.epoch);
     assert_eq!(again.commit, first.commit);
-    assert_eq!(again.value.generation, first.generation);
-    assert_eq!(again.value.epoch, first.epoch);
+    assert_eq!(again.value, first.value);
     assert!(!again.first_delivery);
 }
 
@@ -615,15 +614,30 @@ async fn original_claim_set_target_and_release_survive_later_mutations() {
     let (d1, _) = store.put_blob(b"one".to_vec()).await.unwrap();
     let (d2, _) = store.put_blob(b"two".to_vec()).await.unwrap();
 
-    let claim_op = store.mint_operation();
-    let claimed = store.claim(claim_op, "r", "w", 60, false).await.unwrap();
     let set_op = store.mint_operation();
     let set = store
-        .set_target_op(set_op, "r", d1.clone(), Some(claimed.epoch))
+        .set_target_op(set_op, "r", d1.clone(), None)
         .await
         .unwrap();
+    assert_eq!(set.value.target.as_ref(), Some(&d1));
+    assert!(set.value.lease.is_none());
+
+    let claim_op = store.mint_operation();
+    let claimed = store.claim(claim_op, "r", "w", 60, false).await.unwrap();
+    assert!(
+        claimed.value.lease.is_some(),
+        "fresh claim must carry a lease"
+    );
+    assert_eq!(
+        claimed.value.target.as_ref(),
+        Some(&d1),
+        "fresh claim must retain the existing target"
+    );
+
     let release_op = store.mint_operation();
-    let released = store.release(release_op, "r", set.epoch).await.unwrap();
+    let released = store.release(release_op, "r", claimed.epoch).await.unwrap();
+    assert!(released.value.lease.is_none());
+    assert_eq!(released.value.target.as_ref(), Some(&d1));
 
     let thief = store
         .claim(store.mint_operation(), "r", "thief", 90, true)
@@ -634,27 +648,32 @@ async fn original_claim_set_target_and_release_survive_later_mutations() {
         .await
         .unwrap();
 
+    let set_again = store
+        .set_target_op(set_op, "r", d1.clone(), None)
+        .await
+        .unwrap();
+    assert!(!set_again.first_delivery);
+    assert_eq!(set_again.generation, set.generation);
+    assert_eq!(set_again.epoch, set.epoch);
+    assert_eq!(set_again.commit, set.commit);
+    assert_eq!(set_again.value, set.value);
+
     let claim_again = store.claim(claim_op, "r", "w", 60, false).await.unwrap();
+    assert!(!claim_again.first_delivery);
     assert_eq!(claim_again.generation, claimed.generation);
     assert_eq!(claim_again.epoch, claimed.epoch);
     assert_eq!(claim_again.commit, claimed.commit);
+    assert_eq!(claim_again.value, claimed.value);
     assert_eq!(claim_again.value.lease, claimed.value.lease);
-    assert_eq!(claim_again.value.target, claimed.value.target);
-    assert_eq!(claim_again.value.head_commit, claimed.value.head_commit);
+    assert_eq!(claim_again.value.target.as_ref(), Some(&d1));
 
-    let set_again = store
-        .set_target_op(set_op, "r", d1.clone(), Some(claimed.epoch))
-        .await
-        .unwrap();
-    assert_eq!(set_again.generation, set.generation);
-    assert_eq!(set_again.value.target, Some(d1));
-    assert_eq!(set_again.value.epoch, set.epoch);
-    assert_eq!(set_again.value.head_commit, set.value.head_commit);
-
-    let release_again = store.release(release_op, "r", set.epoch).await.unwrap();
+    let release_again = store.release(release_op, "r", claimed.epoch).await.unwrap();
+    assert!(!release_again.first_delivery);
     assert_eq!(release_again.generation, released.generation);
+    assert_eq!(release_again.commit, released.commit);
+    assert_eq!(release_again.value, released.value);
     assert!(release_again.value.lease.is_none());
-    assert_eq!(release_again.value.head_commit, released.value.head_commit);
+    assert_eq!(release_again.value.target.as_ref(), Some(&d1));
 }
 
 #[tokio::test]
@@ -721,6 +740,84 @@ async fn forged_applied_cache_is_not_publication() {
     let (head, _) = store.read_ref("r").await.unwrap().unwrap();
     assert_eq!(head.head_commit.as_ref(), Some(&published.commit));
     assert_eq!(head.generation, 1);
+}
+
+#[tokio::test]
+async fn applied_cache_candidate_is_not_canonical_publication() {
+    let mem: Arc<MemoryBackend> = Arc::new(MemoryBackend::new());
+    let store = store_on(mem.clone());
+    let (digest, _) = store.put_blob(b"x".to_vec()).await.unwrap();
+    let op = store.mint_operation();
+    let first = store
+        .set_target_op(op, "r", digest.clone(), None)
+        .await
+        .unwrap();
+
+    let request = Material {
+        kind: "set-target".into(),
+        preconditions: vec![("target".into(), digest.to_string().into_bytes())],
+        payload: Vec::new(),
+    }
+    .hash(&store.key, &store.tenant, "r");
+    let mut ref_state = first.value.clone();
+    ref_state.head_commit = None;
+    ref_state.lease = None;
+    let candidate = comb_core::Commit {
+        schema: COMMIT_SCHEMA.into(),
+        header: comb_core::CommitHeader {
+            schema: HEADER_SCHEMA.into(),
+            resource: "r".into(),
+            generation: first.generation,
+            epoch: first.epoch,
+            identity: OpIdentity::Generic(op).canonical(),
+            request: request.clone(),
+            parent: None,
+            skip: None,
+            at: Utc::now(),
+        },
+        change: serde_json::json!({ "kind": "set-target", "target": digest }),
+        result: serde_json::json!({ "generation": first.generation, "epoch": first.epoch }),
+        ref_state,
+    };
+    let (fake, _) = store
+        .put_blob(serde_json::to_vec(&candidate).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(fake, first.commit);
+
+    let intent = OpIntent {
+        schema: INTENT_SCHEMA.into(),
+        identity: OpIdentity::Generic(op).canonical(),
+        resource: "r".into(),
+        request,
+        base_generation: 0,
+        proposed: Vec::new(),
+        state: IntentState::Applied {
+            generation: first.generation,
+            commit: fake.clone(),
+            result: serde_json::json!({ "generation": first.generation, "epoch": first.epoch }),
+        },
+        expires_at: Some(op.expires_at(&OperationPolicy::default())),
+    };
+    mem.delete(&intent_key(op)).await.unwrap();
+    mem.put_update(
+        &intent_key(op),
+        None,
+        &serde_json::to_vec_pretty(&intent).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    store
+        .claim(store.mint_operation(), "r", "thief", 60, true)
+        .await
+        .unwrap();
+
+    let again = store.set_target_op(op, "r", digest, None).await.unwrap();
+    assert_eq!(again.commit, first.commit);
+    assert_ne!(again.commit, fake);
+    assert_eq!(again.value, first.value);
+    assert_eq!(again.generation, first.generation);
 }
 
 #[tokio::test]

@@ -109,8 +109,10 @@ pub(crate) struct CommitView {
     pub header: CommitHeader,
     pub result: serde_json::Value,
     pub admitted: Vec<Admission>,
-    pub target: Option<Digest>,
     pub ref_state: Option<RefValue>,
+    /// Log publications store the manifest as the ref target; that digest is
+    /// the commit object and is filled after the object exists.
+    pub target_follows_commit: bool,
 }
 
 impl Store {
@@ -1143,19 +1145,13 @@ impl Store {
             let commit: Commit = serde_json::from_value(value)
                 .map_err(|e| CoreError::RecoveryFailed(format!("commit {digest} schema: {e}")))?;
             commit.validate()?;
-            let target = commit
-                .change
-                .get("target")
-                .and_then(|t| t.as_str())
-                .and_then(|s| Digest::parse(s).ok())
-                .or_else(|| commit.ref_state.target.clone());
             return Ok(CommitView {
                 digest: digest.clone(),
                 header: commit.header,
                 result: commit.result,
                 admitted: Vec::new(),
-                target,
                 ref_state: Some(commit.ref_state),
+                target_follows_commit: false,
             });
         }
         if schema != LOG_MANIFEST_SCHEMA {
@@ -1192,8 +1188,8 @@ impl Store {
             header,
             result,
             admitted,
-            target: Some(digest.clone()),
             ref_state,
+            target_follows_commit: true,
         })
     }
 
@@ -1312,6 +1308,9 @@ impl Store {
         Ok(())
     }
 
+    /// Applied is a cache. The blob named by `commit` may have been uploaded
+    /// before the ref CAS, so existence is not publication. The digest must
+    /// equal the canonical commit at `generation` in live head history.
     async fn try_cached_applied<T: DeserializeOwned>(
         &self,
         resource: &str,
@@ -1491,11 +1490,16 @@ fn published_from_view<T: DeserializeOwned>(
         ))
         .into());
     }
-    value.generation = view.header.generation;
-    value.epoch = view.header.epoch;
+    if value.generation != view.header.generation || value.epoch != view.header.epoch {
+        return Err(CoreError::RecoveryFailed(format!(
+            "commit {} ref state generation/epoch {}/{} disagrees with header {}/{}",
+            view.digest, value.generation, value.epoch, view.header.generation, view.header.epoch
+        ))
+        .into());
+    }
     value.head_commit = Some(view.digest.clone());
-    if let Some(t) = &view.target {
-        value.target = Some(t.clone());
+    if view.target_follows_commit {
+        value.target = Some(view.digest.clone());
     }
     Ok(Published {
         outcome,
@@ -1621,8 +1625,8 @@ mod tests {
                 first: 3,
                 last: 4,
             }],
-            target: None,
             ref_state: None,
+            target_follows_commit: false,
         };
         let other = store().mint_operation();
         let err =
@@ -1640,5 +1644,49 @@ mod tests {
             outcome_from_view(&view, &OpIdentity::Generic(b)).unwrap();
         assert_eq!(companion["first"], 3);
         assert_eq!(companion["last"], 4);
+    }
+
+    #[test]
+    fn published_from_view_keeps_lease_and_retained_target() {
+        let op = store().mint_operation();
+        let request = DigestKey::from_bytes([9u8; 32]).digest(b"req");
+        let target = DigestKey::from_bytes([2u8; 32]).digest(b"blob");
+        let mut ref_state = RefValue::new("org_t", "r");
+        ref_state.generation = 2;
+        ref_state.epoch = 1;
+        ref_state.target = Some(target.clone());
+        ref_state.lease = Some(comb_core::Lease {
+            writer: "w".into(),
+            lease_until: chrono::Utc::now(),
+        });
+        let view = CommitView {
+            digest: request.clone(),
+            header: CommitHeader {
+                schema: HEADER_SCHEMA.into(),
+                resource: "r".into(),
+                generation: 2,
+                epoch: 1,
+                identity: op.to_string(),
+                request: request.clone(),
+                parent: None,
+                skip: None,
+                at: chrono::Utc::now(),
+            },
+            result: serde_json::json!({"generation": 2, "epoch": 1}),
+            admitted: Vec::new(),
+            ref_state: Some(ref_state.clone()),
+            target_follows_commit: false,
+        };
+        let published = published_from_view::<serde_json::Value>(
+            &view,
+            &OpIdentity::Generic(op),
+            "org_t",
+            false,
+        )
+        .unwrap();
+        assert_eq!(published.value.lease, ref_state.lease);
+        assert_eq!(published.value.target, Some(target));
+        assert_eq!(published.value.head_commit, Some(view.digest));
+        assert_ne!(published.value.lease, None);
     }
 }
