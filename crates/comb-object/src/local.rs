@@ -1,8 +1,9 @@
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, read_sync_limited, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use comb_core::error::{CoreError, Result};
 use std::fs;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 /// Local filesystem backend (spec §7.11): create-only objects through
@@ -40,7 +41,10 @@ impl LocalBackend {
     fn write_tmp(dir: &Path, body: &[u8]) -> Result<PathBuf> {
         fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), rand_suffix()));
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         f.write_all(body)?;
         f.sync_all()?;
         Ok(tmp)
@@ -49,7 +53,10 @@ impl LocalBackend {
 
 fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
     format!("{nanos:08x}")
 }
 
@@ -74,7 +81,12 @@ impl ObjectBackend for LocalBackend {
         }
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         let path = self.path_for(key)?;
         let dir = path.parent().expect("key has parent").to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -85,7 +97,10 @@ impl ObjectBackend for LocalBackend {
             ".lock-{}",
             path.file_name().unwrap().to_string_lossy()
         ));
-        let lock = fs::OpenOptions::new().create(true).write(true).open(&lock_path)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
         lock.lock()?;
 
         let live = match fs::read(&path) {
@@ -96,9 +111,7 @@ impl ObjectBackend for LocalBackend {
         match (&live, expected) {
             (None, None) => {}
             (Some(_), None) => return Err(CoreError::AlreadyExists(key.into())),
-            (None, Some(_)) => {
-                return Err(CoreError::PreconditionFailed(format!("{key}: gone")))
-            }
+            (None, Some(_)) => return Err(CoreError::PreconditionFailed(format!("{key}: gone"))),
             (Some(l), Some(e)) if l == e => {}
             (Some(l), Some(e)) => {
                 return Err(CoreError::PreconditionFailed(format!(
@@ -126,6 +139,34 @@ impl ObjectBackend for LocalBackend {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
+        let path = self.path_for(key)?;
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CoreError::NotFound(key.into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if meta.len() > max_encoded_bytes.get() {
+            return Err(object_too_large(key, max_encoded_bytes, Some(meta.len())));
+        }
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CoreError::NotFound(key.into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = read_sync_limited(file, key, max_encoded_bytes)?;
+        let version = Self::version_of(&bytes);
+        Ok((bytes, version))
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
@@ -169,8 +210,7 @@ impl ObjectBackend for LocalBackend {
                 if !key.starts_with(prefix) {
                     continue;
                 }
-                let modified: chrono::DateTime<chrono::Utc> =
-                    entry.metadata()?.modified()?.into();
+                let modified: chrono::DateTime<chrono::Utc> = entry.metadata()?.modified()?.into();
                 out.push(ObjectInfo { key, modified });
             }
         }
@@ -194,7 +234,10 @@ mod tests {
         ));
 
         let v2 = b.put_update("t/refs/r.json", None, b"g1").await.unwrap();
-        let v3 = b.put_update("t/refs/r.json", Some(&v2), b"g2").await.unwrap();
+        let v3 = b
+            .put_update("t/refs/r.json", Some(&v2), b"g2")
+            .await
+            .unwrap();
         assert!(matches!(
             b.put_update("t/refs/r.json", Some(&v2), b"g3").await,
             Err(CoreError::PreconditionFailed(_))

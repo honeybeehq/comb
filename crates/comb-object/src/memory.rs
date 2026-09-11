@@ -1,8 +1,9 @@
-use crate::backend::{ObjectBackend, ObjectInfo, Version};
+use crate::backend::{object_too_large, ObjectBackend, ObjectInfo, Version};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use comb_core::error::{CoreError, Result};
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Mutex;
 
 /// In-memory backend for tests (spec §7.10). Version tokens are counters.
@@ -28,7 +29,12 @@ impl ObjectBackend for MemoryBackend {
         Ok(Version("1".into()))
     }
 
-    async fn put_update(&self, key: &str, expected: Option<&Version>, body: &[u8]) -> Result<Version> {
+    async fn put_update(
+        &self,
+        key: &str,
+        expected: Option<&Version>,
+        body: &[u8],
+    ) -> Result<Version> {
         let mut state = self.state.lock().unwrap();
         match (state.get(key), expected) {
             (None, None) => {
@@ -59,6 +65,22 @@ impl ObjectBackend for MemoryBackend {
             .ok_or_else(|| CoreError::NotFound(key.into()))
     }
 
+    async fn get_limited(
+        &self,
+        key: &str,
+        max_encoded_bytes: NonZeroU64,
+    ) -> Result<(Vec<u8>, Version)> {
+        let state = self.state.lock().unwrap();
+        let (bytes, version, _) = state
+            .get(key)
+            .ok_or_else(|| CoreError::NotFound(key.into()))?;
+        let actual = bytes.len() as u64;
+        if actual > max_encoded_bytes.get() {
+            return Err(object_too_large(key, max_encoded_bytes, Some(actual)));
+        }
+        Ok((bytes.clone(), Version(version.to_string())))
+    }
+
     async fn exists(&self, key: &str) -> Result<bool> {
         Ok(self.state.lock().unwrap().contains_key(key))
     }
@@ -75,7 +97,10 @@ impl ObjectBackend for MemoryBackend {
             .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(prefix))
-            .map(|(k, (_, _, at))| ObjectInfo { key: k.clone(), modified: *at })
+            .map(|(k, (_, _, at))| ObjectInfo {
+                key: k.clone(),
+                modified: *at,
+            })
             .collect())
     }
 }

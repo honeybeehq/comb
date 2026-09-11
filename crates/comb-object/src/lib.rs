@@ -8,9 +8,11 @@
 
 pub mod backend;
 pub mod conformance;
+pub mod failpoint;
 pub mod fault;
 pub mod local;
 pub mod memory;
 pub mod s3;
 
-pub use backend::{ObjectBackend, Version};
+pub use backend::{ObjectBackend, ObjectInfo, Version};
+pub use failpoint::{CountingBackend, FailAction, FailMethod, FailRule, FailpointBackend};

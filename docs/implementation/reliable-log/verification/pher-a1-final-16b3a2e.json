@@ -1,0 +1,18 @@
+{
+  "artifact": "/tmp/pher-comb-smoke-ewxp0tpt/result.json",
+  "passed": true,
+  "historical_events": 520,
+  "live_events": 2,
+  "crash_restart": true,
+  "cursor_preserved": true,
+  "first_seq": 2,
+  "last_seq": 524,
+  "home": "/tmp/pher-comb-smoke-ewxp0tpt/home",
+  "source_commit": "16b3a2ecd2644905e7136c506aa21970ce9c1284",
+  "binary_sha256": "3474be76b4a17e7a620305a8ac90a31b28653ee0245822ed93af2c1629db8b3d",
+  "binary": "/tmp/pher-comb-smoke-ewxp0tpt/pher",
+  "build_command": "cargo build -p pher --offline",
+  "build_passed": true,
+  "parent_regressions_passed": 7,
+  "parent_test_binary_sha256": "7267db88f538df45edccee4ff4fa0ff1628a8ed122512b978f84e263330ac48b"
+}

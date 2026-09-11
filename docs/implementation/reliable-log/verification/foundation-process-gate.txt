@@ -1,0 +1,17 @@
+local-forward
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}
+
+local-reverse
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}
+
+minio-forward
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}
+
+minio-reverse
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}
+
+s3-forward
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}
+
+s3-reverse
+{"ok":true,"recovered_changes":3,"annotations":2,"projection_sha256":"b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"}

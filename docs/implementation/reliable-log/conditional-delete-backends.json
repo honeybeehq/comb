@@ -1,0 +1,25 @@
+[
+  {
+    "backend": "s3",
+    "bucket": "comb-dev-th",
+    "key": "verification/reliable-log-delete-96512f7e-1d95-48eb-ad2d-6350013dd7bf/object",
+    "checks": {
+      "wrong_token_rejected": true,
+      "wrong_token_preserves_object": true,
+      "incarnation_changes_token": true,
+      "old_incarnation_rejected": true,
+      "new_incarnation_survives": true
+    },
+    "passed": true
+  },
+  {
+    "backend": "minio",
+    "bucket": "comb-dev",
+    "key": "verification/reliable-log-delete-f8b03ac2-0015-4fb9-aee8-9a46747d1260/object",
+    "checks": {
+      "wrong_token_rejected": false
+    },
+    "passed": false,
+    "error": "An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist."
+  }
+]

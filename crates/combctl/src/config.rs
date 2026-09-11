@@ -14,7 +14,9 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum BackendConfig {
-    Local { root: String },
+    Local {
+        root: String,
+    },
     S3 {
         bucket: String,
         region: String,
@@ -33,13 +35,18 @@ fn default_prefix() -> String {
 }
 
 pub fn config_dir(explicit: Option<&Path>) -> PathBuf {
-    explicit.map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".comb"))
+    explicit
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(".comb"))
 }
 
 pub fn load(dir: &Path) -> Result<Config> {
     let path = dir.join("config.toml");
     if !path.exists() {
-        bail!("no Comb config at {} — run `combctl init` first", path.display());
+        bail!(
+            "no Comb config at {} — run `combctl init` first",
+            path.display()
+        );
     }
     let text = std::fs::read_to_string(&path)?;
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
@@ -49,7 +56,10 @@ pub fn save(dir: &Path, config: &Config) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join("config.toml");
     if path.exists() {
-        bail!("{} already exists — refusing to overwrite (it holds the tenant digest key)", path.display());
+        bail!(
+            "{} already exists — refusing to overwrite (it holds the tenant digest key)",
+            path.display()
+        );
     }
     std::fs::write(&path, toml::to_string_pretty(config)?)?;
     Ok(())

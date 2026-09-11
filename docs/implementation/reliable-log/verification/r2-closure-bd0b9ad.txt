@@ -1,0 +1,173 @@
+
+running 1 test
+test review_acquisition_mutex_wait_honors_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_append_cannot_publish_after_lease_expires_during_upload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.05s
+
+
+
+running 1 test
+test review_cancelled_read_is_cancelled ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_existing_v3_survives_later_v1_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_expired_read_is_deadline_exceeded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_foreign_manifest_is_not_replayed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.05s
+
+
+
+running 1 test
+test review_hung_idle_renewal_loses_by_lease_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 1.42s
+
+
+
+running 1 test
+test review_idle_renewal_cannot_revive_expired_lease ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.37s
+
+
+
+running 1 test
+test review_lost_session_cannot_finish_suspended_append ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.13s
+
+
+
+running 1 test
+test review_lost_session_returns_while_upload_stays_blocked ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.13s
+
+
+
+running 1 test
+test review_manifest_head_cannot_hide_catalog_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.10s
+
+
+
+running 1 test
+test review_max_head_is_integrity_not_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.08s
+
+
+
+running 1 test
+test review_missing_committed_target_is_not_empty_feed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.20s
+
+
+
+running 1 test
+test review_missing_target_after_release_cannot_reset_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.04s
+
+
+
+running 1 test
+test review_missing_target_after_release_is_not_empty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_cannot_reset_stable_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_old_target_cannot_hide_committed_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_read_never_uses_unbounded_get ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_real_clock_claim_retry_returns_exact_original_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.02s
+
+
+
+running 1 test
+test review_renewal_rechecks_clock_after_delayed_read ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.18s
+
+
+
+running 1 test
+test review_takeover_preserves_read_before_next_append ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.22s
+
+
+
+running 1 test
+test review_transient_catalog_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.04s
+
+
+
+running 1 test
+test review_transient_manifest_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.04s
+
+
+
+running 1 test
+test review_unacquired_close_completes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_v2_set_target_after_expired_lease_still_works ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s

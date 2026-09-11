@@ -1,0 +1,1002 @@
+{
+  "ok": true,
+  "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+  "bridge_commit": "f238b0fe0c13a2399d8b30e4abfe453254d2de99",
+  "acceptance_commit": "316f321b2290aeb327f807775bc74d85dfe4be9e",
+  "runner_sha256": {
+    "scripts/foundation-bridge-acceptance.mjs": "aee3cfd5a79b6db06115e37f2a2fe35bb9c1c33c76db4045e70f019166650f0d",
+    "scripts/foundation-bridge-client.mjs": "2c65ee714f6d70736e9bad0b73cda5fff713d478ece4b080a8ce9e57f3e30bd7",
+    "scripts/foundation-bridge-client.test.mjs": "13b48203e83004131c039300bc9be53c91e82c1909b5b2750a079620c2a85e76",
+    "scripts/foundation-bridge-fixture.mjs": "e2e11f42e850e350a1a5de302ed1ba32ba3a166662a8feed4d0642399cba710c",
+    "scripts/foundation-bridge-key.mjs": "dd5be833f6c192dd4a5603f97a53113f1f61f53f9a7ae64ef0d4b9fa6698bb40",
+    "scripts/foundation-bridge-key.test.mjs": "dc80c19b5e7a10ded0af1fd1d90e5a83b29e8e3de0b5334d019cabdf33ab6a98",
+    "scripts/foundation-bridge-verify.mjs": "e870d8e3f9c27154f1756060d0baca86193458beebf555585bfdba0b65da00d2",
+    "docs/testing/fixtures/foundation-bridge.json": "7d7a367863668bf3d156a14c09c27756943b53c353df3de8d56f15a0b95167fa"
+  },
+  "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+  "runs": [
+    {
+      "backend": "local",
+      "order": "forward",
+      "capture_exit": 0,
+      "capture_seconds": 1.549,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "forward",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-0",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 154.069708,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 237.08858300000009,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-2",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 319.240958,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-2-9",
+            "elapsed_ms": 8.015750000000025,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-8",
+            "elapsed_ms": 8.27841599999988,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-0-7",
+            "elapsed_ms": 9.63675000000012,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-1050a2a3-914a-4cca-a602-55269f7a1302",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 12.246416999999838,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "af45a1f743bb153379042c9a6f5d3a1a14b6874ab811abf200bc967deb83123b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "local",
+      "order": "reverse",
+      "capture_exit": 0,
+      "capture_seconds": 1.034,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "reverse",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-0",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 167.61300000000003,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 253.20000000000002,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-2",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 364.59291599999995,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-0-7",
+            "elapsed_ms": 7.715749999999957,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-8",
+            "elapsed_ms": 9.464000000000055,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-2-9",
+            "elapsed_ms": 10.708624999999984,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-7f2abbd3-f88e-4eab-9ecc-725667fcf7ab",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 12.889999999999986,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "55d2ecffe2496769b9e5db9d97c224a3b319a9b842573b368e47f5a5f0d96c4b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "minio",
+      "order": "forward",
+      "capture_exit": 0,
+      "capture_seconds": 3.394,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "forward",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-0",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 681.264166,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 985.981375,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-2",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 1226.902459,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-2-9",
+            "elapsed_ms": 32.43724999999995,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-8",
+            "elapsed_ms": 57.93270800000005,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-0-7",
+            "elapsed_ms": 67.56933299999992,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-a2516a9f-067a-4fde-ab86-78a5b539432c",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 206.54479200000014,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "af45a1f743bb153379042c9a6f5d3a1a14b6874ab811abf200bc967deb83123b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "minio",
+      "order": "reverse",
+      "capture_exit": 0,
+      "capture_seconds": 3.058,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "reverse",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-0",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 627.803375,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 879.527167,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-2",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 1164.850542,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-8",
+            "elapsed_ms": 38.36241599999994,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-2-9",
+            "elapsed_ms": 56.79666599999996,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-0-7",
+            "elapsed_ms": 66.03483400000005,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-4398ae4c-130f-4628-be70-69b75f831799",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 217.54724999999962,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "55d2ecffe2496769b9e5db9d97c224a3b319a9b842573b368e47f5a5f0d96c4b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "s3",
+      "order": "forward",
+      "capture_exit": 0,
+      "capture_seconds": 4.498,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "forward",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-2",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 969.545916,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 975.9723329999999,
+            "outcome": "backend_unavailable",
+            "deadline_exceeded": false,
+            "retry": true,
+            "backoff_ms": 100
+          },
+          {
+            "client": "writer-0",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 993.649333,
+            "outcome": "backend_unavailable",
+            "deadline_exceeded": false,
+            "retry": true,
+            "backoff_ms": 100
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 2,
+            "request_id": "writer-1-7",
+            "elapsed_ms": 1452.258541,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-0",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 2,
+            "request_id": "writer-0-8",
+            "elapsed_ms": 1838.308,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-10",
+            "elapsed_ms": 46.05554200000006,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-2-11",
+            "elapsed_ms": 45.780874999999924,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-0-9",
+            "elapsed_ms": 48.45600000000013,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-7e96d504-0461-4bd4-8055-0dfc5eceae7f",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 414.7307920000003,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "55d2ecffe2496769b9e5db9d97c224a3b319a9b842573b368e47f5a5f0d96c4b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "s3",
+      "order": "reverse",
+      "capture_exit": 0,
+      "capture_seconds": 5.27,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "reverse",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "append_retry_policy": {
+          "timeoutMs": 60000,
+          "maxAttempts": 6,
+          "initialBackoffMs": 100,
+          "maxBackoffMs": 2000
+        },
+        "append_attempts": [
+          {
+            "client": "writer-0",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "writer-0-4",
+            "elapsed_ms": 1065.9675,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-2",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "writer-2-6",
+            "elapsed_ms": 1541.73475,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "writer-1-5",
+            "elapsed_ms": 1551.2833329999999,
+            "outcome": "backend_unavailable",
+            "deadline_exceeded": false,
+            "retry": true,
+            "backoff_ms": 100
+          },
+          {
+            "client": "writer-1",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 2,
+            "request_id": "writer-1-7",
+            "elapsed_ms": 2150.037,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-0",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "retry-0-8",
+            "elapsed_ms": 64.21945899999992,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-1",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "03c6a075f65606430bac2b3bc405dc5bf594db4b9da153bf999a51c10e79e1f9",
+            "payload_hex_sha256": "c2dc4fde900928ae77e6e315d545ea1149fb0f5351dd0a28c7f3e918ad40cdb8",
+            "attempt": 1,
+            "request_id": "retry-1-9",
+            "elapsed_ms": 64.38437500000009,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "retry-2",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "ebc7c895bbba66171ca8f1e21c34ee9784d32dd6faec7b414b12015479587b94",
+            "payload_hex_sha256": "2b1ed6058cdbeadedfce93847968ae35dc0960894ececa131bdeb161183fed11",
+            "attempt": 1,
+            "request_id": "retry-2-10",
+            "elapsed_ms": 64.37000000000035,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          },
+          {
+            "client": "fresh-client",
+            "log": "foundation-18e31567-d648-499c-97d0-bf6c7dcc4817",
+            "key_hex_sha256": "679a2aed3197894b8febf08c69a0f4a1e3628acdc90478e0b93751e2245cd2a4",
+            "payload_hex_sha256": "55c45e051448698446f4c4bf5ab8fa51e9ab5b1691edc9b9da238533f2f83984",
+            "attempt": 1,
+            "request_id": "fresh-client-2",
+            "elapsed_ms": 633.1912499999999,
+            "outcome": "ok",
+            "deadline_exceeded": false,
+            "retry": false,
+            "backoff_ms": 0
+          }
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "05202b8f440ed4d4039eb35ad0e454b01a214859300bacb18c03d5659b578c87",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    }
+  ],
+  "integration_commit": "b1597eb",
+  "artifact_directory": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-foundation-verified-vzq0brgt",
+  "recorded_at": "2026-09-06T15:04:37.981393+00:00",
+  "gate_helper_sha256": "1fb3e3d18c0b94df315a7f83f17eaa7474d73123bb2e6cf142f0ba6d362eb629",
+  "caller_node_tests": {
+    "passed": 24,
+    "failed": 0
+  }
+}

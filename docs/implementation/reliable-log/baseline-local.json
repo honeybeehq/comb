@@ -1,0 +1,11 @@
+{
+  "source_commit": "b77b64e",
+  "events": 256,
+  "producers": 4,
+  "wall_seconds": 6.836656625033356,
+  "bench": "bench: 256 events, 4 producers, 64B payloads, 10ms commit window\n\n  wall time        6.30s\n  events acked     256\n  events/sec       41\n  commits (CAS)    64  (avg batch 4.0 events)\n  CAS conflicts    0\n  ack latency p50  96ms\n  ack latency p99  232ms\n",
+  "status": "head_seq 256  epoch 1  chunks 64  leader bench (until 05:33:10)\n",
+  "file_count": 130,
+  "stored_bytes": 390345,
+  "scratch": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-baseline-77tol494"
+}

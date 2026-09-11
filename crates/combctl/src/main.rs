@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use comb_core::{Digest, DigestKey};
+use comb_core::{Digest, DigestKey, OperationId};
 use comb_object::local::LocalBackend;
 use comb_object::s3::S3Backend;
 use combctl::config::{self, BackendConfig, Config};
@@ -89,6 +89,8 @@ enum Command {
         /// Administrative takeover of a live lease (fences the old writer)
         #[arg(long)]
         steal: bool,
+        #[arg(long)]
+        operation: Option<String>,
     },
     /// Renew a lease (requires the fence; not journaled)
     Renew {
@@ -103,6 +105,8 @@ enum Command {
         name: String,
         #[arg(long)]
         fence: u64,
+        #[arg(long)]
+        operation: Option<String>,
     },
 }
 
@@ -122,6 +126,13 @@ enum LogCommand {
         writer: String,
         #[arg(long, default_value_t = 60)]
         lease: i64,
+        #[arg(long)]
+        operation: Option<String>,
+        /// Hex-encoded opaque stable key (complete-feed logs only)
+        #[arg(long)]
+        stable_key: Option<String>,
+        #[arg(long)]
+        complete: bool,
     },
     /// Read events in order from a sequence position
     Read {
@@ -144,14 +155,22 @@ enum LogCommand {
         name: String,
         #[arg(long)]
         writer: String,
+        #[arg(long)]
+        operation: Option<String>,
     },
     /// Merge WAL chunks into a segment (representation only, contents unchanged)
-    Compact { name: String },
+    Compact {
+        name: String,
+        #[arg(long)]
+        operation: Option<String>,
+    },
     /// Advance the retention floor; readers below it get Trimmed{resume_at}
     Trim {
         name: String,
         #[arg(long)]
         before: u64,
+        #[arg(long)]
+        operation: Option<String>,
     },
     /// Throughput benchmark through the group-commit writer
     Bench {
@@ -178,6 +197,8 @@ enum RefCommand {
         /// Fencing token from `claim`; required while the ref is leased
         #[arg(long)]
         fence: Option<u64>,
+        #[arg(long)]
+        operation: Option<String>,
     },
     /// Show the journal for a ref (newest first)
     History {
@@ -199,16 +220,27 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     let dir = config::config_dir(cli.dir.as_deref());
 
-    if let Command::Chaos { iterations, seed, fail_prob } = &cli.command {
+    if let Command::Chaos {
+        iterations,
+        seed,
+        fail_prob,
+    } = &cli.command
+    {
         println!(
             "chaos: {iterations} iterations, seed {seed}, fault probability {fail_prob} per call\n\
              (in-memory backend; every operation may lose its request or its response)\n"
         );
         let report = combctl::chaos::run(*iterations, *seed, *fail_prob, true).await?;
         println!("\n  operations acked      {}", report.acked);
-        println!("  clean failures        {}  (LeaseHeld / stale CAS — correct rejections)", report.clean_failures);
+        println!(
+            "  clean failures        {}  (LeaseHeld / stale CAS — correct rejections)",
+            report.clean_failures
+        );
         println!("  faults injected       {}", report.injected_faults);
-        println!("  ambiguous acks        {}  (committed but caller saw an error)", report.ambiguous_acks);
+        println!(
+            "  ambiguous acks        {}  (committed but caller saw an error)",
+            report.ambiguous_acks
+        );
         println!("  invariant violations  {}", report.violations.len());
         for v in &report.violations {
             println!("    VIOLATION: {v}");
@@ -221,14 +253,30 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    if let Command::Init { tenant, backend, root, bucket, region, profile, prefix, endpoint } = &cli.command {
+    if let Command::Init {
+        tenant,
+        backend,
+        root,
+        bucket,
+        region,
+        profile,
+        prefix,
+        endpoint,
+    } = &cli.command
+    {
         let backend = match backend.as_str() {
             "local" => BackendConfig::Local {
-                root: root.clone().ok_or_else(|| anyhow!("--root is required for local backend"))?,
+                root: root
+                    .clone()
+                    .ok_or_else(|| anyhow!("--root is required for local backend"))?,
             },
             "s3" => BackendConfig::S3 {
-                bucket: bucket.clone().ok_or_else(|| anyhow!("--bucket is required for s3 backend"))?,
-                region: region.clone().ok_or_else(|| anyhow!("--region is required for s3 backend"))?,
+                bucket: bucket
+                    .clone()
+                    .ok_or_else(|| anyhow!("--bucket is required for s3 backend"))?,
+                region: region
+                    .clone()
+                    .ok_or_else(|| anyhow!("--region is required for s3 backend"))?,
                 profile: profile.clone(),
                 prefix: prefix.clone(),
                 endpoint: endpoint.clone(),
@@ -249,16 +297,32 @@ async fn run(cli: Cli) -> Result<()> {
 
     let cfg = config::load(&dir)?;
     let key = DigestKey::from_hex(&cfg.digest_key)?;
-    let (backend, cache_dir): (std::sync::Arc<dyn comb_object::ObjectBackend>, Option<PathBuf>) = match &cfg.backend {
+    let (backend, cache_dir): (
+        std::sync::Arc<dyn comb_object::ObjectBackend>,
+        Option<PathBuf>,
+    ) = match &cfg.backend {
         BackendConfig::Local { root } => (std::sync::Arc::new(LocalBackend::new(root)), None),
-        BackendConfig::S3 { bucket, region, profile, prefix, endpoint } => (
+        BackendConfig::S3 {
+            bucket,
+            region,
+            profile,
+            prefix,
+            endpoint,
+        } => (
             std::sync::Arc::new(
-                S3Backend::connect(profile.as_deref(), Some(region), bucket, prefix, endpoint.as_deref()).await,
+                S3Backend::connect(
+                    profile.as_deref(),
+                    Some(region),
+                    bucket,
+                    prefix,
+                    endpoint.as_deref(),
+                )
+                .await,
             ),
             Some(dir.join("cache")),
         ),
     };
-    let store = Store { backend, tenant: cfg.tenant.clone(), key, cache_dir };
+    let store = Store::new(backend, cfg.tenant.clone(), key, cache_dir);
 
     match cli.command {
         Command::Init { .. } | Command::Chaos { .. } => unreachable!(),
@@ -276,7 +340,11 @@ async fn run(cli: Cli) -> Result<()> {
                     "  {}  {:<45} {}",
                     if r.passed { "PASS" } else { "FAIL" },
                     r.name,
-                    if r.passed { String::new() } else { r.detail.clone() }
+                    if r.passed {
+                        String::new()
+                    } else {
+                        r.detail.clone()
+                    }
                 );
                 if !r.passed {
                     failed += 1;
@@ -286,7 +354,10 @@ async fn run(cli: Cli) -> Result<()> {
             if failed == 0 {
                 println!("backend CONFORMS ({} checks)", results.len());
             } else {
-                println!("backend DOES NOT CONFORM: {failed}/{} checks failed", results.len());
+                println!(
+                    "backend DOES NOT CONFORM: {failed}/{} checks failed",
+                    results.len()
+                );
                 println!("this backend MUST NOT be used as an authoritative Comb backend");
                 std::process::exit(2);
             }
@@ -298,7 +369,11 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{digest}");
             eprintln!(
                 "{size} bytes stored{}",
-                if dedup { " (already present — deduplicated)" } else { "" }
+                if dedup {
+                    " (already present — deduplicated)"
+                } else {
+                    ""
+                }
             );
         }
         Command::Get { digest, out } => {
@@ -311,7 +386,11 @@ async fn run(cli: Cli) -> Result<()> {
                         "{} bytes written to {} (from {})",
                         payload.len(),
                         path.display(),
-                        if source == GetSource::Cache { "cache" } else { "backend" }
+                        if source == GetSource::Cache {
+                            "cache"
+                        } else {
+                            "backend"
+                        }
                     );
                 }
                 None => {
@@ -323,67 +402,120 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Verify { digest } => {
             let digest = Digest::parse(&digest)?;
             // Bypass the cache: verify what the backend actually holds.
-            let no_cache = Store { cache_dir: None, ..store };
+            let no_cache = Store::new(
+                store.backend.clone(),
+                store.tenant.clone(),
+                store.key.clone(),
+                None,
+            );
             let (payload, _) = no_cache.get_blob(&digest).await?;
             println!("ok: {digest} verified ({} bytes)", payload.len());
         }
-        Command::Ref(RefCommand::Get { name }) => {
-            match store.read_ref(&name).await? {
-                None => println!("ref {name} does not exist"),
-                Some((value, _)) => println!("{}", serde_json::to_string_pretty(&value)?),
-            }
-        }
-        Command::Ref(RefCommand::Set { name, digest, fence }) => {
+        Command::Ref(RefCommand::Get { name }) => match store.read_ref(&name).await? {
+            None => println!("ref {name} does not exist"),
+            Some((value, _)) => println!("{}", serde_json::to_string_pretty(&value)?),
+        },
+        Command::Ref(RefCommand::Set {
+            name,
+            digest,
+            fence,
+            operation,
+        }) => {
             let digest = Digest::parse(&digest)?;
-            let value = store.set_target(&name, digest, fence).await?;
+            let op = take_op(&store, operation)?;
+            let value = store.set_target_op(op, &name, digest, fence).await?;
             println!(
-                "{} -> {} (generation {}, epoch {})",
+                "{} -> {} (generation {}, epoch {}, first {})",
                 name,
-                value.target.as_ref().unwrap(),
+                value.value.target.as_ref().unwrap(),
                 value.generation,
-                value.epoch
+                value.epoch,
+                value.first_delivery
             );
         }
         Command::Ref(RefCommand::History { name, max }) => {
             let entries = store.history(&name, max).await?;
             if entries.is_empty() {
-                println!("no journal entries for {name}");
+                println!("no commit history for {name}");
             }
             for e in entries {
                 println!(
                     "gen {:>4}  epoch {:>3}  {}  {}  {}",
-                    e.new_generation,
+                    e.generation,
                     e.epoch,
                     e.at.format("%Y-%m-%d %H:%M:%S"),
-                    e.writer.as_deref().unwrap_or("-"),
-                    e.target.as_ref().map(|d| d.to_string()).unwrap_or_else(|| "-".into()),
+                    e.identity,
+                    e.commit,
                 );
             }
         }
         Command::Log(cmd) => {
             use combctl::log::LogStore;
             match cmd {
-                LogCommand::Append { name, events, writer, lease } => {
+                LogCommand::Append {
+                    name,
+                    events,
+                    writer,
+                    lease,
+                    operation,
+                    stable_key,
+                    complete,
+                } => {
                     if events.is_empty() {
                         return Err(anyhow!("nothing to append"));
                     }
-                    let log = LogStore::new(&store, &name);
-                    let (first, last) = log.append(&writer, &events, lease).await?;
-                    println!("appended seq {first}..{last} ({} events) as {writer}", events.len());
+                    let log = if complete {
+                        LogStore::complete_feed(&store, &name)
+                    } else {
+                        LogStore::new(&store, &name)
+                    };
+                    let payloads: Vec<Vec<u8>> =
+                        events.into_iter().map(|e| e.into_bytes()).collect();
+                    if let Some(hex_key) = stable_key {
+                        if payloads.len() != 1 {
+                            return Err(anyhow!("stable append takes exactly one payload"));
+                        }
+                        let key = comb_core::StableKey::from_hex(&hex_key)?;
+                        let rec = log.append_stable(key, &writer, &payloads[0], lease).await?;
+                        println!(
+                            "stable appended seq {}..{} generation {}",
+                            rec.range.first, rec.range.last, rec.generation
+                        );
+                    } else {
+                        let op = take_op(&store, operation)?;
+                        let a = log.append(op, &writer, &payloads, lease).await?;
+                        println!(
+                            "appended seq {}..{} ({} events) as {writer} generation {}",
+                            a.first,
+                            a.last,
+                            a.last - a.first + 1,
+                            a.generation
+                        );
+                    }
                 }
                 LogCommand::Read { name, from } => {
                     let log = LogStore::new(&store, &name);
                     for f in log.read(from).await? {
-                        println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), f.payload);
+                        let text = String::from_utf8_lossy(&f.payload);
+                        println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), text);
                     }
                 }
-                LogCommand::Follow { name, from, poll_ms } => {
+                LogCommand::Follow {
+                    name,
+                    from,
+                    poll_ms,
+                } => {
                     let log = LogStore::new(&store, &name);
-                    eprintln!("following {name} from seq {from} (poll {poll_ms}ms, Ctrl-C to stop)");
+                    eprintln!(
+                        "following {name} from seq {from} (poll {poll_ms}ms, Ctrl-C to stop)"
+                    );
                     log.follow(
                         from,
                         poll_ms,
-                        |f| println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), f.payload),
+                        |f| {
+                            let text = String::from_utf8_lossy(&f.payload);
+                            println!("{:>6}  {}  {}", f.seq, f.at.format("%H:%M:%S%.3f"), text);
+                        },
                         || false,
                     )
                     .await?;
@@ -396,7 +528,13 @@ async fn run(cli: Cli) -> Result<()> {
                             let leader = value
                                 .lease
                                 .as_ref()
-                                .map(|l| format!("{} (until {})", l.writer, l.lease_until.format("%H:%M:%S")))
+                                .map(|l| {
+                                    format!(
+                                        "{} (until {})",
+                                        l.writer,
+                                        l.lease_until.format("%H:%M:%S")
+                                    )
+                                })
                                 .unwrap_or_else(|| "none".into());
                             println!(
                                 "head_seq {}  epoch {}  chunks {}  leader {}",
@@ -408,26 +546,46 @@ async fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                LogCommand::Steal { name, writer } => {
+                LogCommand::Steal {
+                    name,
+                    writer,
+                    operation,
+                } => {
                     let log = LogStore::new(&store, &name);
-                    let epoch = log.steal(&writer, 60).await?;
+                    let op = take_op(&store, operation)?;
+                    let epoch = log.steal(op, &writer, 60).await?;
                     println!("leadership taken by {writer} at epoch {epoch}");
                 }
-                LogCommand::Compact { name } => {
+                LogCommand::Compact { name, operation } => {
                     let log = LogStore::new(&store, &name);
-                    let merged = log.compact().await?;
+                    let op = take_op(&store, operation)?;
+                    let merged = log.compact(op).await?;
                     if merged == 0 {
                         println!("nothing to compact (fewer than 2 WAL chunks)");
                     } else {
                         println!("compacted {merged} chunks into 1 segment; contents unchanged; old chunks are now orphans");
                     }
                 }
-                LogCommand::Trim { name, before } => {
+                LogCommand::Trim {
+                    name,
+                    before,
+                    operation,
+                } => {
                     let log = LogStore::new(&store, &name);
-                    let floor = log.trim_before(before).await?;
-                    println!("retention floor is now {floor}; reads resume at {}", floor + 1);
+                    let op = take_op(&store, operation)?;
+                    let floor = log.trim_before(op, before).await?;
+                    println!(
+                        "retention floor is now {floor}; reads resume at {}",
+                        floor + 1
+                    );
                 }
-                LogCommand::Bench { name, events, producers, payload_bytes, window_ms } => {
+                LogCommand::Bench {
+                    name,
+                    events,
+                    producers,
+                    payload_bytes,
+                    window_ms,
+                } => {
                     use combctl::log::GroupWriter;
                     let payload = "x".repeat(payload_bytes);
                     let (writer, task) =
@@ -446,7 +604,11 @@ async fn run(cli: Cli) -> Result<()> {
                             let mut latencies = Vec::with_capacity(per);
                             for _ in 0..per {
                                 let t0 = std::time::Instant::now();
-                                writer.submit(vec![payload.clone()]).await.unwrap();
+                                let op = comb_core::OperationId::mint(&comb_core::SystemClock);
+                                writer
+                                    .submit(op, vec![payload.clone().into_bytes()])
+                                    .await
+                                    .unwrap();
                                 latencies.push(t0.elapsed());
                             }
                             latencies
@@ -463,8 +625,15 @@ async fn run(cli: Cli) -> Result<()> {
                     let p = |q: f64| latencies[((latencies.len() - 1) as f64 * q) as usize];
                     println!("\n  wall time        {:.2}s", wall.as_secs_f64());
                     println!("  events acked     {}", stats.events);
-                    println!("  events/sec       {:.0}", stats.events as f64 / wall.as_secs_f64());
-                    println!("  commits (CAS)    {}  (avg batch {:.1} events)", stats.commits, stats.events as f64 / stats.commits.max(1) as f64);
+                    println!(
+                        "  events/sec       {:.0}",
+                        stats.events as f64 / wall.as_secs_f64()
+                    );
+                    println!(
+                        "  commits (CAS)    {}  (avg batch {:.1} events)",
+                        stats.commits,
+                        stats.events as f64 / stats.commits.max(1) as f64
+                    );
                     println!("  CAS conflicts    {}", stats.conflicts);
                     println!("  ack latency p50  {:.0}ms", p(0.5).as_millis());
                     println!("  ack latency p99  {:.0}ms", p(0.99).as_millis());
@@ -493,9 +662,16 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("dry-run: pass --yes to delete");
             }
         }
-        Command::Claim { name, writer, ttl, steal } => {
-            let value = store.claim(&name, &writer, ttl, steal).await?;
-            let lease = value.lease.as_ref().unwrap();
+        Command::Claim {
+            name,
+            writer,
+            ttl,
+            steal,
+            operation,
+        } => {
+            let op = take_op(&store, operation)?;
+            let value = store.claim(op, &name, &writer, ttl, steal).await?;
+            let lease = value.value.lease.as_ref().unwrap();
             println!(
                 "claimed {name} as {} — fence {} (lease until {})",
                 lease.writer,
@@ -511,10 +687,26 @@ async fn run(cli: Cli) -> Result<()> {
                 value.generation
             );
         }
-        Command::Release { name, fence } => {
-            let value = store.release(&name, fence).await?;
+        Command::Release {
+            name,
+            fence,
+            operation,
+        } => {
+            let op = take_op(&store, operation)?;
+            let value = store.release(op, &name, fence).await?;
             println!("released {name} (generation {})", value.generation);
         }
     }
     Ok(())
+}
+
+fn take_op(store: &combctl::store::Store, flag: Option<String>) -> Result<OperationId> {
+    match flag {
+        Some(s) => Ok(OperationId::parse(&s)?),
+        None => {
+            let op = store.mint_operation();
+            eprintln!("operation: {op}");
+            Ok(op)
+        }
+    }
 }

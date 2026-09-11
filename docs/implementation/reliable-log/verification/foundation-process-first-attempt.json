@@ -1,0 +1,242 @@
+{
+  "ok": false,
+  "production_commit": "f238b0fe0c13a2399d8b30e4abfe453254d2de99",
+  "runs": [
+    {
+      "backend": "local",
+      "order": "forward",
+      "capture_exit": 0,
+      "capture_seconds": 1.741,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-733e2fad-db34-4e53-b65e-3e8c38a218c3",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "forward",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "e36b0a887a0b550f80eb60b8ca04cc00e7a47e0de5f97efbb009fe944cf482ea",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "local",
+      "order": "reverse",
+      "capture_exit": 0,
+      "capture_seconds": 0.84,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-d8fcfbb4-cbd5-4bd8-ae9c-8220133ee4ee",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "reverse",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "55d2ecffe2496769b9e5db9d97c224a3b319a9b842573b368e47f5a5f0d96c4b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "minio",
+      "order": "forward",
+      "capture_exit": 0,
+      "capture_seconds": 2.937,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-7445a550-8d1f-4123-a9fb-5afc097f371d",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "forward",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "e36b0a887a0b550f80eb60b8ca04cc00e7a47e0de5f97efbb009fe944cf482ea",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "minio",
+      "order": "reverse",
+      "capture_exit": 0,
+      "capture_seconds": 2.5,
+      "verify_exit": 0,
+      "receipt": {
+        "log": "foundation-cdb0ae1f-4229-4dc6-843d-8a83dd9b9702",
+        "fixture": "85c0bba4-9d61-4544-a2d3-4e9205ae821f",
+        "arrival_order": "reverse",
+        "foundation_commit": "1fa1b10a1ffe61596b0898ebd3fa5962f155bf85",
+        "binary_sha256": "a0489c7e4414a1c524c71d0a3ffc4c7b9d968483f8510ad1640c784784c072f1",
+        "checks": [
+          "multiple logical clients append while follow is pending",
+          "same stable keys return original ranges without advancing head",
+          "changed bytes conflict without append",
+          "fresh process and client recover committed stable key without prior cache",
+          "fresh client replays exact bytes with bounded pages and no silent gaps"
+        ],
+        "hello": {
+          "protocol": 1,
+          "capabilities": {
+            "ops": [
+              "hello",
+              "append",
+              "head",
+              "read",
+              "follow"
+            ],
+            "durable_idempotency": true,
+            "bounded_memory_read": true,
+            "payload_hex": true
+          },
+          "limits": {
+            "max_frame_bytes": 1048576,
+            "max_concurrent_requests": 32,
+            "max_queued_output": 64,
+            "max_append_events": 1,
+            "max_append_bytes": 491520,
+            "max_read_events": 256,
+            "max_read_bytes": 491520,
+            "max_follow_timeout_ms": 30000,
+            "max_log_name_len": 128,
+            "max_id_len": 128,
+            "max_idempotency_key_len": 1024
+          }
+        },
+        "ok": true
+      },
+      "capture_sha256": "55d2ecffe2496769b9e5db9d97c224a3b319a9b842573b368e47f5a5f0d96c4b",
+      "reconstruction": {
+        "ok": true,
+        "recovered_changes": 3,
+        "annotations": 2,
+        "projection_sha256": "b23b2bdba1887d615f5a3d11add3bc4203cd72eed33e35d4582f6713d8c1424a"
+      }
+    },
+    {
+      "backend": "s3",
+      "order": "forward",
+      "capture_exit": 1,
+      "capture_seconds": 2.792
+    }
+  ],
+  "failure": "S3 concurrent append returned backend_unavailable; acceptance caller failed before explicit same-key retry",
+  "artifact_dir": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-foundation-verified-n7z6872e"
+}

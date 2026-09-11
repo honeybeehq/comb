@@ -1,0 +1,138 @@
+{
+  "sha": "a53d49b769020720195dc19b98d50a3a1f831f2c",
+  "binary_sha256": "fc8a96fe86aac08348201dacb10325060ee9905114b39581211190b4e0a235d5",
+  "source_sha256": "f24d2477f429181ca26df350aa2c3ecd4f0fb57fe188dcb553767990ee211bc1",
+  "results": [
+    {
+      "test": "review_acquisition_mutex_wait_honors_deadline",
+      "exit": 0,
+      "seconds": 0.041676708962768316
+    },
+    {
+      "test": "review_append_cannot_publish_after_lease_expires_during_upload",
+      "exit": 0,
+      "seconds": 0.02686987502966076
+    },
+    {
+      "test": "review_cancelled_read_is_cancelled",
+      "exit": 0,
+      "seconds": 0.021938125020824373
+    },
+    {
+      "test": "review_existing_v3_survives_later_v1_ref",
+      "exit": 0,
+      "seconds": 0.025788167025893927
+    },
+    {
+      "test": "review_expired_read_is_deadline_exceeded",
+      "exit": 0,
+      "seconds": 0.021643499960191548
+    },
+    {
+      "test": "review_foreign_manifest_is_not_replayed",
+      "exit": 0,
+      "seconds": 0.033733249991200864
+    },
+    {
+      "test": "review_hung_idle_renewal_loses_by_lease_deadline",
+      "exit": 0,
+      "seconds": 1.4261827500304207
+    },
+    {
+      "test": "review_idle_renewal_cannot_revive_expired_lease",
+      "exit": 0,
+      "seconds": 0.3716606659581885
+    },
+    {
+      "test": "review_lost_session_cannot_finish_suspended_append",
+      "exit": 101,
+      "seconds": 0.1281523338984698
+    },
+    {
+      "test": "review_manifest_head_cannot_hide_catalog_events",
+      "exit": 0,
+      "seconds": 0.03535016602836549
+    },
+    {
+      "test": "review_max_head_is_integrity_not_overflow",
+      "exit": 0,
+      "seconds": 0.026268666959367692
+    },
+    {
+      "test": "review_missing_committed_target_is_not_empty_feed",
+      "exit": 0,
+      "seconds": 0.02385570900514722
+    },
+    {
+      "test": "review_missing_target_after_release_cannot_reset_key",
+      "exit": 0,
+      "seconds": 0.029172749957069755
+    },
+    {
+      "test": "review_missing_target_after_release_is_not_empty",
+      "exit": 0,
+      "seconds": 0.023080540937371552
+    },
+    {
+      "test": "review_missing_target_cannot_reset_stable_identity",
+      "exit": 0,
+      "seconds": 0.026731458958238363
+    },
+    {
+      "test": "review_old_target_cannot_hide_committed_key",
+      "exit": 0,
+      "seconds": 0.025524916010908782
+    },
+    {
+      "test": "review_read_never_uses_unbounded_get",
+      "exit": 0,
+      "seconds": 0.021028875024057925
+    },
+    {
+      "test": "review_real_clock_claim_retry_returns_exact_original_ref",
+      "exit": 101,
+      "seconds": 0.02798824990168214
+    },
+    {
+      "test": "review_renewal_rechecks_clock_after_delayed_read",
+      "exit": 0,
+      "seconds": 0.17050474998541176
+    },
+    {
+      "test": "review_takeover_preserves_read_before_next_append",
+      "exit": 0,
+      "seconds": 0.037432000041007996
+    },
+    {
+      "test": "review_transient_catalog_read_recovers",
+      "exit": 0,
+      "seconds": 0.050248665967956185
+    },
+    {
+      "test": "review_transient_manifest_read_recovers",
+      "exit": 0,
+      "seconds": 0.04999412491451949
+    },
+    {
+      "test": "review_unacquired_close_completes",
+      "exit": 0,
+      "seconds": 0.023702083039097488
+    },
+    {
+      "test": "review_v2_set_target_after_expired_lease_still_works",
+      "exit": 101,
+      "seconds": 0.027207208913750947
+    }
+  ],
+  "baseline": {
+    "sha": "5b0d1d71f3754cb63b8f8873907638009e7117ec",
+    "binary_sha256": "a8762061c4f6343398bc242840aa58923d72e2d9f4ea2b0595e2a7e51e21df49",
+    "exit": 0,
+    "tests": [
+      "review_real_clock_claim_retry_returns_exact_original_ref",
+      "review_v2_set_target_after_expired_lease_still_works"
+    ]
+  },
+  "method": "fixed git archives; independent private targets; immutable copied executables; exact tests bounded to 8s",
+  "setup_correction": "The Lost test initially used an invalid 2s acquire budget with a 3s TTL. Final source uses a valid 3s budget. Only the final executed trace is included."
+}

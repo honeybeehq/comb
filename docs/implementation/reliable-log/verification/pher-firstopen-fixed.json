@@ -1,0 +1,15 @@
+{
+  "source_commit": "de71087",
+  "binary_sha256": "6fd3d1e7e653bd791e9244455b22bb94e311b1446f1edce990c3e61f36aeab8f",
+  "runs_per_test": 20,
+  "fresh_paths_per_test_run": 24,
+  "completed_runs": 40,
+  "passed": true,
+  "elapsed_secs": 197.641,
+  "tests": [
+    "traillog::tests::concurrent_first_opens_do_not_lower_head",
+    "traillog::tests::repeated_fresh_path_concurrent_opens_initialize"
+  ],
+  "command": "IMMUTABLE_TEST_BINARY --exact TEST --test-threads=1",
+  "total_fresh_paths": 960
+}

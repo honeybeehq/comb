@@ -1,0 +1,23 @@
+=== local ===
+
+running 1 test
+test live_v3_lost_cas_and_fresh_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.53s
+
+
+=== s3 ===
+
+running 1 test
+test live_v3_lost_cas_and_fresh_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.88s
+
+
+=== minio ===
+
+running 1 test
+test live_v3_lost_cas_and_fresh_reader ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.78s
+

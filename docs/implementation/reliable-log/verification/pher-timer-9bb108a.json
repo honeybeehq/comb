@@ -1,0 +1,9 @@
+{
+  "source_commit": "9bb108aa0f88edc1ab22e97e86c2d02837346ea9",
+  "command": "cargo test -p pher --offline review_ -- --test-threads=1",
+  "returncode": 101,
+  "prior_regressions_passed": 3,
+  "held_retry_regression_failed": 1,
+  "binary_sha256": "f7cb0fcd5db46616eae62f6d11e5934666604199baf0ba8711c11b43724d0bd5",
+  "source_archive": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/pher-a1-review-_nd73vp7/repo"
+}

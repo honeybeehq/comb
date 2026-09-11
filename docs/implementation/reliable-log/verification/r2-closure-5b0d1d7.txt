@@ -1,0 +1,201 @@
+
+running 1 test
+test review_acquisition_mutex_wait_honors_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_append_cannot_publish_after_lease_expires_during_upload ...
+thread 'review_append_cannot_publish_after_lease_expires_during_upload' (58375306) panicked at crates/combctl/tests/r2_parent_review.rs:799:5:
+new append published after lease expired during upload: Ok(StableAppendReceipt { payload_hash: b3k:307f3fc061ef49985282304bfa482c21fdfe90a5c135a6d010cc5bdda3e0ab47, range: AppendRange { first: 1, last: 1 }, generation: 2 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_append_cannot_publish_after_lease_expires_during_upload
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_cancelled_read_is_cancelled ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_existing_v3_survives_later_v1_ref ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_expired_read_is_deadline_exceeded ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_foreign_manifest_is_not_replayed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_hung_idle_renewal_loses_by_lease_deadline ...
+thread 'review_hung_idle_renewal_loses_by_lease_deadline' (58375322) panicked at crates/combctl/tests/r2_parent_review.rs:740:5:
+hung renewal stayed Active beyond lease: Active { epoch: 1, lease_until: 2026-09-06T12:44:02.832700Z }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_hung_idle_renewal_loses_by_lease_deadline
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.41s
+
+
+
+running 1 test
+test review_idle_renewal_cannot_revive_expired_lease ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.35s
+
+
+
+running 1 test
+test review_manifest_head_cannot_hide_catalog_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_max_head_is_integrity_not_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_missing_committed_target_is_not_empty_feed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_after_release_cannot_reset_key ...
+thread 'review_missing_target_after_release_cannot_reset_key' (58375441) panicked at crates/combctl/tests/r2_parent_review.rs:544:5:
+released committed key was reset: Ok(StableAppendReceipt { payload_hash: b3k:0b2971df34cbf08b52d86732a09b948ceac277f5893922050e4c18f26a228992, range: AppendRange { first: 1, last: 1 }, generation: 5 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_missing_target_after_release_cannot_reset_key
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_after_release_is_not_empty ...
+thread 'review_missing_target_after_release_is_not_empty' (58375447) panicked at crates/combctl/tests/r2_parent_review.rs:514:5:
+missing retained target after release became empty: Ok(ReadPage { events: [], next: Cursor { partition: 0, next_seq: 1 }, snapshot_head: 0, raw_payload_bytes: 0, at_head: true })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_missing_target_after_release_is_not_empty
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_missing_target_cannot_reset_stable_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_old_target_cannot_hide_committed_key ...
+thread 'review_old_target_cannot_hide_committed_key' (58375453) panicked at crates/combctl/tests/r2_parent_review.rs:584:5:
+old target hid committed key: Ok(StableAppendReceipt { payload_hash: b3k:0b2971df34cbf08b52d86732a09b948ceac277f5893922050e4c18f26a228992, range: AppendRange { first: 2, last: 2 }, generation: 4 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_old_target_cannot_hide_committed_key
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.02s
+
+
+
+running 1 test
+test review_read_never_uses_unbounded_get ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+
+running 1 test
+test review_renewal_rechecks_clock_after_delayed_read ...
+thread 'review_renewal_rechecks_clock_after_delayed_read' (58375460) panicked at crates/combctl/tests/r2_parent_review.rs:697:5:
+assertion `left == right` failed: expired lease was rewritten using pre-read clock
+  left: 5
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_renewal_rechecks_clock_after_delayed_read
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.15s
+
+
+
+running 1 test
+test review_takeover_preserves_read_before_next_append ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.01s
+
+
+
+running 1 test
+test review_transient_catalog_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.03s
+
+
+
+running 1 test
+test review_transient_manifest_read_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.04s
+
+
+
+running 1 test
+test review_unacquired_close_completes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s

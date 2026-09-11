@@ -1,0 +1,16 @@
+{
+  "artifact": "/tmp/pher-comb-smoke-zfgz_ikf/result.json",
+  "passed": true,
+  "historical_events": 520,
+  "live_events": 2,
+  "crash_restart": true,
+  "cursor_preserved": true,
+  "first_seq": 2,
+  "last_seq": 524,
+  "home": "/tmp/pher-comb-smoke-zfgz_ikf/home",
+  "source_commit": "cd1cb26",
+  "binary_sha256": "c77305922870cdff5d9d7c09a9ffa455284ee9aac2ba294e00f0959aec7cab23",
+  "binary": "/tmp/pher-comb-smoke-zfgz_ikf/pher",
+  "build_command": "cargo build -p pher --offline",
+  "build_passed": true
+}

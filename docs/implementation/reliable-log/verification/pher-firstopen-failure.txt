@@ -1,0 +1,24 @@
+
+running 1 test
+test traillog::tests::concurrent_first_opens_do_not_lower_head ... FAILED
+
+failures:
+
+---- traillog::tests::concurrent_first_opens_do_not_lower_head stdout ----
+
+thread '<unnamed>' (57494474) panicked at crates/pher/src/traillog.rs:820:74:
+called `Result::unwrap()` on an `Err` value: database is locked
+
+Caused by:
+    Error code 5: The database file is locked
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'traillog::tests::concurrent_first_opens_do_not_lower_head' (57494468) panicked at crates/pher/src/traillog.rs:822:27:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+
+
+failures:
+    traillog::tests::concurrent_first_opens_do_not_lower_head
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 59 filtered out; finished in 0.13s
+

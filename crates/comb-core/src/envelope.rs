@@ -1,13 +1,21 @@
 use crate::digest::{Digest, DigestKey};
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, EnvelopeFormatField, Result};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 /// Envelope binary layout (spec §7.3, decided in v0.3):
 /// fixed header (magic "COMB", envelope version u16, flags u16, meta length
 /// u32, all little-endian) + canonical JSON metadata + payload.
 const MAGIC: &[u8; 4] = b"COMB";
 const ENVELOPE_VERSION: u16 = 1;
-const MAX_META_BYTES: u32 = 64 * 1024;
+pub const MAX_ENVELOPE_META_BYTES: u32 = 64 * 1024;
+const MAX_META_BYTES: u32 = MAX_ENVELOPE_META_BYTES;
+
+/// Encoded-object caps for classed reads. Callers pass these into
+/// `decode_limited` and `ObjectBackend::get_limited`.
+pub const MAX_REF_OBJECT_BYTES: u64 = 64 * 1024;
+pub const MAX_MANIFEST_OBJECT_BYTES: u64 = 512 * 1024;
+pub const MAX_STABLE_INDEX_NODE_OBJECT_BYTES: u64 = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -15,6 +23,35 @@ pub enum ObjectKind {
     Blob,
     Manifest,
     JournalEntry,
+}
+
+impl ObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Manifest => "manifest",
+            Self::JournalEntry => "journal-entry",
+        }
+    }
+
+    fn from_meta_str(s: &str) -> Option<Self> {
+        match s {
+            "blob" => Some(Self::Blob),
+            "manifest" => Some(Self::Manifest),
+            "journal-entry" => Some(Self::JournalEntry),
+            _ => None,
+        }
+    }
+}
+
+/// Checked policy for a bounded envelope read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnvelopeReadSpec<'a> {
+    pub tenant: &'a str,
+    pub kind: ObjectKind,
+    pub allowed_schemas: &'a [&'a str],
+    pub max_encoded_bytes: NonZeroU64,
+    pub max_plaintext_bytes: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +78,13 @@ impl Envelope {
     /// canonical plaintext with the tenant digest key (spec §7.2, §7.4).
     /// Compression and encryption are "none" in this slice; both are
     /// format-tagged so later versions can add them without migration.
-    pub fn new(tenant: &str, kind: ObjectKind, schema: &str, payload: Vec<u8>, key: &DigestKey) -> Self {
+    pub fn new(
+        tenant: &str,
+        kind: ObjectKind,
+        schema: &str,
+        payload: Vec<u8>,
+        key: &DigestKey,
+    ) -> Self {
         let digest = key.digest(&payload);
         Envelope {
             meta: EnvelopeMeta {
@@ -83,15 +126,36 @@ impl Envelope {
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
         if version != ENVELOPE_VERSION {
-            return Err(CoreError::InvalidFormat(format!("unsupported envelope version {version}")));
+            return Err(CoreError::InvalidFormat(format!(
+                "unsupported envelope version {version}"
+            )));
+        }
+        let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
+        if flags != 0 {
+            return Err(unsupported(EnvelopeFormatField::Flags, flags.to_string()));
         }
         let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         if meta_len > MAX_META_BYTES as usize || bytes.len() < 12 + meta_len {
-            return Err(CoreError::InvalidFormat("truncated envelope metadata".into()));
+            return Err(CoreError::InvalidFormat(
+                "truncated envelope metadata".into(),
+            ));
         }
         let meta: EnvelopeMeta = serde_json::from_slice(&bytes[12..12 + meta_len])
             .map_err(|e| CoreError::InvalidFormat(format!("meta decode: {e}")))?;
-        let payload = bytes[12 + meta_len..].to_vec();
+        if meta.compression != "none" {
+            return Err(unsupported(
+                EnvelopeFormatField::Compression,
+                meta.compression,
+            ));
+        }
+        if meta.encryption != "none" {
+            return Err(unsupported(
+                EnvelopeFormatField::Encryption,
+                meta.encryption,
+            ));
+        }
+        let payload = envelope_payload_suffix(bytes, meta_len)
+            .ok_or_else(|| CoreError::InvalidFormat("truncated envelope payload".into()))?;
         if payload.len() as u64 != meta.plaintext_bytes {
             return Err(CoreError::IntegrityError(format!(
                 "payload length {} does not match declared {}",
@@ -99,20 +163,187 @@ impl Envelope {
                 meta.plaintext_bytes
             )));
         }
-        let actual = key.digest(&payload);
+        let actual = key.digest(payload);
         if actual != meta.digest {
             return Err(CoreError::IntegrityError(format!(
                 "digest mismatch: declared {}, computed {actual}",
                 meta.digest
             )));
         }
-        Ok(Envelope { meta, payload })
+        Ok(Envelope {
+            meta,
+            payload: payload.to_vec(),
+        })
+    }
+
+    /// Bounded decode used by R2 classed reads.
+    ///
+    /// Order is fixed: encoded-size cap, fixed header and at most 64 KiB of
+    /// metadata, format tags, then untransformed payload length and digest.
+    /// Compression and encryption other than `"none"` never reach a codec
+    /// or payload deserializer. The payload suffix is not cloned until every
+    /// cap and the digest have been checked against the borrowed bytes.
+    pub fn decode_limited(
+        bytes: &[u8],
+        key: &DigestKey,
+        spec: EnvelopeReadSpec<'_>,
+    ) -> Result<Self> {
+        Self::decode_limited_with(bytes, key, spec, |payload| Ok(payload.to_vec()))
+            .map(|(meta, payload)| Envelope { meta, payload })
+    }
+
+    /// Same checks as [`Self::decode_limited`], then runs `decode_payload` on
+    /// the borrowed suffix. The callback is not invoked until tenant, kind,
+    /// schema, encoded cap, plaintext cap, declared length, and digest all
+    /// succeed.
+    pub fn decode_limited_with<T, F>(
+        bytes: &[u8],
+        key: &DigestKey,
+        spec: EnvelopeReadSpec<'_>,
+        decode_payload: F,
+    ) -> Result<(EnvelopeMeta, T)>
+    where
+        F: FnOnce(&[u8]) -> Result<T>,
+    {
+        let (meta, payload) = inspect_limited(bytes, spec)?;
+        let pt_limit = spec.max_plaintext_bytes.get();
+        if meta.plaintext_bytes > pt_limit {
+            return Err(CoreError::ObjectTooLarge {
+                key: String::new(),
+                limit: pt_limit,
+                actual: Some(meta.plaintext_bytes),
+            });
+        }
+        let actual_len = payload.len() as u64;
+        if actual_len > pt_limit {
+            return Err(CoreError::ObjectTooLarge {
+                key: String::new(),
+                limit: pt_limit,
+                actual: Some(actual_len),
+            });
+        }
+        if actual_len != meta.plaintext_bytes {
+            return Err(CoreError::IntegrityError(format!(
+                "payload length {actual_len} does not match declared {}",
+                meta.plaintext_bytes
+            )));
+        }
+        let actual = key.digest(payload);
+        if actual != meta.digest {
+            return Err(CoreError::IntegrityError(format!(
+                "digest mismatch: declared {}, computed {actual}",
+                meta.digest
+            )));
+        }
+        let decoded = decode_payload(payload)?;
+        Ok((meta, decoded))
+    }
+
+    /// Borrowed payload suffix of a framed envelope, ignoring format tags.
+    /// Used by the cache path to decide whether an `ObjectTooLarge` failure
+    /// is an authenticated oversized object (terminal) or cache poison.
+    pub fn payload_suffix(bytes: &[u8]) -> Option<&[u8]> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        let meta_len = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+        envelope_payload_suffix(bytes, meta_len)
+    }
+}
+
+fn envelope_payload_suffix(bytes: &[u8], meta_len: usize) -> Option<&[u8]> {
+    let start = 12usize.checked_add(meta_len)?;
+    bytes.get(start..)
+}
+
+fn inspect_limited<'a>(
+    bytes: &'a [u8],
+    spec: EnvelopeReadSpec<'_>,
+) -> Result<(EnvelopeMeta, &'a [u8])> {
+    let limit = spec.max_encoded_bytes.get();
+    if bytes.len() as u64 > limit {
+        return Err(CoreError::ObjectTooLarge {
+            key: String::new(),
+            limit,
+            actual: Some(bytes.len() as u64),
+        });
+    }
+    if bytes.len() < 12 || &bytes[0..4] != MAGIC {
+        return Err(CoreError::InvalidFormat("bad envelope magic".into()));
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if version != ENVELOPE_VERSION {
+        return Err(unsupported(
+            EnvelopeFormatField::Version,
+            version.to_string(),
+        ));
+    }
+    let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if flags != 0 {
+        return Err(unsupported(EnvelopeFormatField::Flags, flags.to_string()));
+    }
+    let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if meta_len > MAX_META_BYTES || bytes.len() < 12 + meta_len as usize {
+        return Err(CoreError::InvalidFormat(
+            "truncated envelope metadata".into(),
+        ));
+    }
+    let meta_bytes = &bytes[12..12 + meta_len as usize];
+    let raw: serde_json::Value = serde_json::from_slice(meta_bytes)
+        .map_err(|e| CoreError::InvalidFormat(format!("meta decode: {e}")))?;
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| CoreError::InvalidFormat("envelope metadata must be an object".into()))?;
+
+    let compression = meta_string(obj, "compression")?;
+    if compression != "none" {
+        return Err(unsupported(EnvelopeFormatField::Compression, compression));
+    }
+    let encryption = meta_string(obj, "encryption")?;
+    if encryption != "none" {
+        return Err(unsupported(EnvelopeFormatField::Encryption, encryption));
+    }
+    let tenant = meta_string(obj, "tenant")?;
+    if tenant != spec.tenant {
+        return Err(unsupported(EnvelopeFormatField::Tenant, tenant));
+    }
+    let kind_str = meta_string(obj, "kind")?;
+    match ObjectKind::from_meta_str(&kind_str) {
+        Some(kind) if kind == spec.kind => {}
+        _ => {
+            return Err(unsupported(EnvelopeFormatField::ObjectKind, kind_str));
+        }
+    }
+    let schema = meta_string(obj, "schema")?;
+    if !spec.allowed_schemas.contains(&schema.as_str()) {
+        return Err(unsupported(EnvelopeFormatField::Schema, schema));
+    }
+
+    let meta: EnvelopeMeta = serde_json::from_value(raw)
+        .map_err(|e| CoreError::InvalidFormat(format!("meta decode: {e}")))?;
+    let payload = envelope_payload_suffix(bytes, meta_len as usize)
+        .ok_or_else(|| CoreError::InvalidFormat("truncated envelope payload".into()))?;
+    Ok((meta, payload))
+}
+
+fn unsupported(field: EnvelopeFormatField, value: String) -> CoreError {
+    CoreError::UnsupportedEnvelopeFormat { field, value }
+}
+
+fn meta_string(obj: &serde_json::Map<String, serde_json::Value>, name: &str) -> Result<String> {
+    match obj.get(name) {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(CoreError::InvalidFormat(format!(
+            "metadata {name} must be a string"
+        ))),
+        None => Err(CoreError::InvalidFormat(format!("metadata missing {name}"))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::EnvelopeFormatField;
 
     fn key() -> DigestKey {
         DigestKey::from_bytes([7u8; 32])
@@ -120,7 +351,13 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let bytes = env.encode().unwrap();
         let back = Envelope::decode(&bytes, &key()).unwrap();
         assert_eq!(back.payload, b"payload");
@@ -129,7 +366,13 @@ mod tests {
 
     #[test]
     fn bit_flip_is_detected() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let mut bytes = env.encode().unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
@@ -141,9 +384,263 @@ mod tests {
 
     #[test]
     fn wrong_tenant_key_fails_verification() {
-        let env = Envelope::new("org_t", ObjectKind::Blob, "comb.object/v1", b"payload".to_vec(), &key());
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            b"payload".to_vec(),
+            &key(),
+        );
         let bytes = env.encode().unwrap();
         let other = DigestKey::from_bytes([9u8; 32]);
-        assert!(matches!(Envelope::decode(&bytes, &other), Err(CoreError::IntegrityError(_))));
+        assert!(matches!(
+            Envelope::decode(&bytes, &other),
+            Err(CoreError::IntegrityError(_))
+        ));
+    }
+
+    const BLOB_SCHEMAS: &[&str] = &["comb.object/v1"];
+
+    fn cap(n: u64) -> NonZeroU64 {
+        NonZeroU64::new(n).expect("nonzero")
+    }
+
+    fn blob_spec(max_encoded: u64, max_plaintext: u64) -> EnvelopeReadSpec<'static> {
+        EnvelopeReadSpec {
+            tenant: "org_t",
+            kind: ObjectKind::Blob,
+            allowed_schemas: BLOB_SCHEMAS,
+            max_encoded_bytes: cap(max_encoded),
+            max_plaintext_bytes: cap(max_plaintext),
+        }
+    }
+
+    fn frame(version: u16, flags: u16, meta: &serde_json::Value, payload: &[u8]) -> Vec<u8> {
+        let meta_bytes = serde_json::to_vec(meta).unwrap();
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&meta_bytes);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn sample() -> (Envelope, Vec<u8>, serde_json::Value) {
+        let env = Envelope::new(
+            "org_t",
+            ObjectKind::Blob,
+            "comb.object/v1",
+            br#"{"ok":true}"#.to_vec(),
+            &key(),
+        );
+        let bytes = env.encode().unwrap();
+        let meta = serde_json::to_value(&env.meta).unwrap();
+        (env, bytes, meta)
+    }
+
+    fn reject_format(bytes: &[u8], field: EnvelopeFormatField, value: &str) {
+        let err = Envelope::decode_limited(bytes, &key(), blob_spec(4096, 4096))
+            .expect_err("format must fail before payload decode");
+        match err {
+            CoreError::UnsupportedEnvelopeFormat {
+                field: got_field,
+                value: got_value,
+            } => {
+                assert_eq!(got_field, field);
+                assert_eq!(got_value, value);
+            }
+            other => panic!("expected UnsupportedEnvelopeFormat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limited_roundtrip_then_payload_decode() {
+        let (env, bytes, _) = sample();
+        let back =
+            Envelope::decode_limited(&bytes, &key(), blob_spec(bytes.len() as u64, 4096)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&back.payload).unwrap();
+        assert_eq!(back.payload, env.payload);
+        assert_eq!(value["ok"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn limited_rejects_one_byte_over_encoded_cap() {
+        let (_, bytes, _) = sample();
+        let err = Envelope::decode_limited(&bytes, &key(), blob_spec(bytes.len() as u64 - 1, 4096))
+            .unwrap_err();
+        match err {
+            CoreError::ObjectTooLarge { limit, actual, .. } => {
+                assert_eq!(limit, bytes.len() as u64 - 1);
+                assert_eq!(actual, Some(bytes.len() as u64));
+            }
+            other => panic!("expected ObjectTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_nonzero_flags_and_codecs() {
+        let (env, bytes, meta) = sample();
+        let mut flagged = bytes.clone();
+        flagged[6] = 1;
+        flagged[7] = 0;
+        assert!(matches!(
+            Envelope::decode(&flagged, &key()),
+            Err(CoreError::UnsupportedEnvelopeFormat {
+                field: EnvelopeFormatField::Flags,
+                ..
+            })
+        ));
+        let mut compression = meta.clone();
+        compression["compression"] = serde_json::json!("gzip");
+        assert!(matches!(
+            Envelope::decode(&frame(1, 0, &compression, &env.payload), &key()),
+            Err(CoreError::UnsupportedEnvelopeFormat {
+                field: EnvelopeFormatField::Compression,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unsupported_format_fields_skip_payload_decoder() {
+        let (env, bytes, meta) = sample();
+        let payload = env.payload.as_slice();
+
+        let mut versioned = bytes.clone();
+        versioned[4] = 2;
+        versioned[5] = 0;
+        reject_format(&versioned, EnvelopeFormatField::Version, "2");
+
+        let mut flagged = bytes.clone();
+        flagged[6] = 1;
+        flagged[7] = 0;
+        reject_format(&flagged, EnvelopeFormatField::Flags, "1");
+
+        let mut compression = meta.clone();
+        compression["compression"] = serde_json::json!("gzip");
+        reject_format(
+            &frame(1, 0, &compression, payload),
+            EnvelopeFormatField::Compression,
+            "gzip",
+        );
+
+        let mut encryption = meta.clone();
+        encryption["encryption"] = serde_json::json!("aesg");
+        reject_format(
+            &frame(1, 0, &encryption, payload),
+            EnvelopeFormatField::Encryption,
+            "aesg",
+        );
+
+        let mut kind = meta.clone();
+        kind["kind"] = serde_json::json!("manifest");
+        reject_format(
+            &frame(1, 0, &kind, payload),
+            EnvelopeFormatField::ObjectKind,
+            "manifest",
+        );
+
+        let mut unknown_kind = meta.clone();
+        unknown_kind["kind"] = serde_json::json!("chunk");
+        reject_format(
+            &frame(1, 0, &unknown_kind, payload),
+            EnvelopeFormatField::ObjectKind,
+            "chunk",
+        );
+
+        let mut schema = meta.clone();
+        schema["schema"] = serde_json::json!("comb.object/v2");
+        reject_format(
+            &frame(1, 0, &schema, payload),
+            EnvelopeFormatField::Schema,
+            "comb.object/v2",
+        );
+
+        let mut tenant = meta.clone();
+        tenant["tenant"] = serde_json::json!("other");
+        reject_format(
+            &frame(1, 0, &tenant, payload),
+            EnvelopeFormatField::Tenant,
+            "other",
+        );
+    }
+
+    #[test]
+    fn limited_rejects_forged_declared_length_before_payload_callback() {
+        let (_, _, mut meta) = sample();
+        meta["plaintext_bytes"] = serde_json::json!(4);
+        let forged = frame(1, 0, &meta, &vec![0xff; 256]);
+        let spec = blob_spec(4096, 64);
+        let err = Envelope::decode_limited(&forged, &key(), spec).unwrap_err();
+        match err {
+            CoreError::ObjectTooLarge {
+                limit: 64,
+                actual: Some(256),
+                ..
+            } => {}
+            other => panic!("expected actual-length ObjectTooLarge, got {other:?}"),
+        }
+
+        let mut called = false;
+        let err = Envelope::decode_limited_with(&forged, &key(), spec, |_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(!called, "payload decoder must not run on forged length");
+        assert!(matches!(err, CoreError::ObjectTooLarge { limit: 64, .. }));
+    }
+
+    #[test]
+    fn decode_limited_with_skips_decoder_when_plaintext_exceeds_cap() {
+        let (env, bytes, _) = sample();
+        let mut called = false;
+        let err = Envelope::decode_limited_with(
+            &bytes,
+            &key(),
+            blob_spec(4096, (env.payload.len() as u64) - 1),
+            |_| {
+                called = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!called);
+        match err {
+            CoreError::ObjectTooLarge { limit, actual, .. } => {
+                assert_eq!(limit, (env.payload.len() as u64) - 1);
+                assert_eq!(actual, Some(env.payload.len() as u64));
+            }
+            other => panic!("expected ObjectTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limited_allowlist_accepts_either_carrier_schema() {
+        let (env, _, meta) = sample();
+        let payload = env.payload.as_slice();
+        let mut commit = meta.clone();
+        commit["schema"] = serde_json::json!("comb.commit/v1");
+        let mut manifest = meta;
+        manifest["schema"] = serde_json::json!("comb.log.partition-manifest/v2");
+        let spec = EnvelopeReadSpec {
+            tenant: "org_t",
+            kind: ObjectKind::Blob,
+            allowed_schemas: &["comb.commit/v1", "comb.log.partition-manifest/v2"],
+            max_encoded_bytes: cap(4096),
+            max_plaintext_bytes: cap(4096),
+        };
+        Envelope::decode_limited(&frame(1, 0, &commit, payload), &key(), spec).unwrap();
+        Envelope::decode_limited(&frame(1, 0, &manifest, payload), &key(), spec).unwrap();
+        let blob_only = blob_spec(4096, 4096);
+        match Envelope::decode_limited(&frame(1, 0, &commit, payload), &key(), blob_only) {
+            Err(CoreError::UnsupportedEnvelopeFormat {
+                field: EnvelopeFormatField::Schema,
+                ..
+            }) => {}
+            other => panic!("expected schema rejection, got {other:?}"),
+        }
     }
 }

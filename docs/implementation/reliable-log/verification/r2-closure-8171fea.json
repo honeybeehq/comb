@@ -1,0 +1,147 @@
+{
+  "source_sha": "8171fea",
+  "archive": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-closure-6em8if2v",
+  "scope": "Independent fixed-source closure tests; not Foundation acceptance",
+  "results": {
+    "feed": {
+      "source_sha": "8171fea",
+      "binary_sha256": "9210720a65aa2b239f5e419074fcb25c742ce56e355ff64eb6d70d06223e178e",
+      "archive": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-closure-6em8if2v",
+      "results": [
+        {
+          "test": "review_acquisition_mutex_wait_honors_deadline",
+          "exit_code": 101,
+          "timed_out": false,
+          "elapsed_seconds": 0.403
+        },
+        {
+          "test": "review_cancelled_read_is_cancelled",
+          "exit_code": 101,
+          "timed_out": false,
+          "elapsed_seconds": 0.079
+        },
+        {
+          "test": "review_existing_v3_survives_later_v1_ref",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.072
+        },
+        {
+          "test": "review_expired_read_is_deadline_exceeded",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.077
+        },
+        {
+          "test": "review_foreign_manifest_is_not_replayed",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.075
+        },
+        {
+          "test": "review_idle_renewal_cannot_revive_expired_lease",
+          "exit_code": 101,
+          "timed_out": false,
+          "elapsed_seconds": 0.598
+        },
+        {
+          "test": "review_max_head_is_integrity_not_overflow",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.069
+        },
+        {
+          "test": "review_read_never_uses_unbounded_get",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.074
+        },
+        {
+          "test": "review_takeover_preserves_read_before_next_append",
+          "exit_code": 101,
+          "timed_out": false,
+          "elapsed_seconds": 0.071
+        },
+        {
+          "test": "review_transient_manifest_read_recovers",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.077
+        },
+        {
+          "test": "review_unacquired_close_completes",
+          "exit_code": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.063
+        }
+      ]
+    },
+    "additional_integrity": {
+      "source_sha": "8171fea",
+      "binary_sha256": "d89fc6611263b8ba4d9a02871b5f82bc82c82404e83496f36d6c72f869db6fbd",
+      "results": [
+        {
+          "test": "review_missing_committed_target_is_not_empty_feed",
+          "exit_code": 101,
+          "elapsed_seconds": 0.422
+        },
+        {
+          "test": "review_missing_target_cannot_reset_stable_identity",
+          "exit_code": 101,
+          "elapsed_seconds": 0.033
+        }
+      ]
+    },
+    "catalog": {
+      "source_sha": "8171fea",
+      "binary_sha256": "cfe09381988412fe93fd1c89d3383b387811e9f8fcfab3c4bb2d68955bb9f521",
+      "results": [
+        {
+          "test": "catalog::parent_review::review_2100_refs_preserve_every_child_height",
+          "exit_code": 0,
+          "elapsed_seconds": 28.59
+        },
+        {
+          "test": "catalog::parent_review::review_seek_rejects_depth_beyond_bound",
+          "exit_code": 0,
+          "elapsed_seconds": 0.053
+        },
+        {
+          "test": "catalog::parent_review::review_seek_rejects_noncovering_leaf",
+          "exit_code": 0,
+          "elapsed_seconds": 0.14
+        }
+      ]
+    },
+    "cancellation_repeats": [
+      {
+        "test": "review_cancelled_read_is_cancelled",
+        "runs": 12,
+        "passed": 5,
+        "failed": 7
+      },
+      {
+        "test": "review_expired_read_is_deadline_exceeded",
+        "runs": 12,
+        "passed": 8,
+        "failed": 4
+      }
+    ],
+    "catalog_transient": {
+      "source_sha": "8171fea",
+      "binary_sha256": "c4c689c2e6c9ea2853c91f02d3c2bf670a4cb7012dde9b2ad862a702f85617c7",
+      "test": "review_transient_catalog_read_recovers",
+      "exit_code": 101,
+      "elapsed_seconds": 0.655,
+      "failpoint": "GetLimited DropRequest on the actual catalog root digest"
+    },
+    "head_binding": {
+      "source_sha": "8171fea",
+      "binary_sha256": "179aae9fe896ba1f67f46c2ccecc07425a16465b70643ea15eff84d1450ac3ea",
+      "test": "review_manifest_head_cannot_hide_catalog_events",
+      "exit_code": 101,
+      "elapsed_seconds": 0.627
+    }
+  },
+  "test_source_sha256": "d8b5a88730f36f541abbce7b0e1ce5c16f15b4644e86294ec939001467b20e50"
+}

@@ -1,0 +1,181 @@
+review_2100_refs_preserve_every_child_height.txt
+
+running 1 test
+test catalog::parent_review::review_2100_refs_preserve_every_child_height ... 
+thread 'catalog::parent_review::review_2100_refs_preserve_every_child_height' (58031022) panicked at crates/combctl/src/catalog.rs:617:47:
+assertion `left == right` failed: branch child did not decrease height
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    catalog::parent_review::review_2100_refs_preserve_every_child_height
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 10.74s
+
+
+review_cancelled_read_is_cancelled.txt
+
+running 1 test
+test review_cancelled_read_is_cancelled ... 
+thread 'review_cancelled_read_is_cancelled' (58026766) panicked at crates/combctl/tests/r2_parent_review.rs:49:5:
+assertion failed: matches!(feed.read_page(Cursor::first(0), limits(), &c).await,
+    Err(ReadError::Cancelled))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_cancelled_read_is_cancelled
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s
+
+
+review_existing_v3_survives_later_v1_ref.txt
+
+running 1 test
+test review_existing_v3_survives_later_v1_ref ... 
+thread 'review_existing_v3_survives_later_v1_ref' (58026769) panicked at crates/combctl/tests/r2_parent_review.rs:153:10:
+existing v3 must remain authoritative: Integrity(LogIntegrityError("invalid format: comb/v1 ref log/parent/p0 exists; this process uses comb/v2 only and will not read or rewrite v1 tenants"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_existing_v3_survives_later_v1_ref
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.05s
+
+
+review_expired_read_is_deadline_exceeded.txt
+
+running 1 test
+test review_expired_read_is_deadline_exceeded ... 
+thread 'review_expired_read_is_deadline_exceeded' (58026779) panicked at crates/combctl/tests/r2_parent_review.rs:61:5:
+assertion failed: matches!(feed.read_page(Cursor::first(0), limits(), &c).await,
+    Err(ReadError::DeadlineExceeded))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_expired_read_is_deadline_exceeded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.06s
+
+
+review_foreign_manifest_is_not_replayed.txt
+
+running 1 test
+test review_foreign_manifest_is_not_replayed ... 
+thread 'review_foreign_manifest_is_not_replayed' (58026780) panicked at crates/combctl/tests/r2_parent_review.rs:243:5:
+assertion failed: matches!(feed.read_page(Cursor::first(0), limits(), &call()).await,
+    Err(ReadError::Integrity(_)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_foreign_manifest_is_not_replayed
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.08s
+
+
+review_max_head_is_integrity_not_overflow.txt
+
+running 1 test
+test review_max_head_is_integrity_not_overflow ... 
+thread 'review_max_head_is_integrity_not_overflow' (58026785) panicked at crates/combctl/src/feed.rs:488:35:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_max_head_is_integrity_not_overflow
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.02s
+
+
+review_read_never_uses_unbounded_get.txt
+
+running 1 test
+test review_read_never_uses_unbounded_get ... 
+thread 'review_read_never_uses_unbounded_get' (58026786) panicked at crates/combctl/tests/r2_parent_review.rs:81:5:
+assertion `left == right` failed: bounded read called unbounded ref get
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_read_never_uses_unbounded_get
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.05s
+
+
+review_seek_rejects_depth_beyond_bound.txt
+
+running 1 test
+test catalog::parent_review::review_seek_rejects_depth_beyond_bound ... 
+thread 'catalog::parent_review::review_seek_rejects_depth_beyond_bound' (58031255) panicked at crates/combctl/src/catalog.rs:635:3:
+ten branch hops exceed height bound
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    catalog::parent_review::review_seek_rejects_depth_beyond_bound
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.01s
+
+
+review_seek_rejects_noncovering_leaf.txt
+
+running 1 test
+test catalog::parent_review::review_seek_rejects_noncovering_leaf ... 
+thread 'catalog::parent_review::review_seek_rejects_noncovering_leaf' (58031258) panicked at crates/combctl/src/catalog.rs:627:3:
+noncovering leaf is integrity failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    catalog::parent_review::review_seek_rejects_noncovering_leaf
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+
+review_transient_manifest_read_recovers.txt
+
+running 1 test
+test review_transient_manifest_read_recovers ... 
+thread 'review_transient_manifest_read_recovers' (58026798) panicked at crates/combctl/tests/r2_parent_review.rs:114:10:
+transient manifest read should recover: Integrity(LogIntegrityError("backend unavailable: injected: get_limited request lost"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    review_transient_manifest_read_recovers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s
+
+
+review_unacquired_close_completes.txt
+
+running 1 test
+test review_unacquired_close_completes ... 

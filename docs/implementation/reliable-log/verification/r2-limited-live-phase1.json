@@ -1,0 +1,20 @@
+{
+  "binary_sha256": "290e1504b490634455d49573f63edd41ab9c8a21a37b68607a96b169474bb3a9",
+  "source_executable": "/Users/trmd/Projects/honeybee/comb/repos/comb-reliable-log-r2/target-r2/debug/deps/comb_object-1c743bbf622f66bb",
+  "source_mtime": 1788688669.3411894,
+  "scope": "existing phase-1 executable, copied before launch; no claim for current dirty worktree or final R2",
+  "path": "/var/folders/y2/lgjk786x2qz6s_gt20x091vc0000gn/T/comb-r2-limited-live-pt95vu7b",
+  "runs": [
+    {
+      "backend": "s3",
+      "exit_code": 0,
+      "elapsed_seconds": 3.008
+    },
+    {
+      "backend": "minio",
+      "exit_code": 0,
+      "elapsed_seconds": 2.587
+    }
+  ],
+  "test": "conformance::tests::s3_get_limited_conforms_if_configured"
+}

@@ -1,0 +1,134 @@
+{
+  "source_sha": "842ebf1d7620b2aa7397782e31b326d538c22d32",
+  "binary_sha256": "5b6d93bfce809939cba77a2b157fed12e4ffa0e9baee3c2f85df734f0aefd583",
+  "results": [
+    {
+      "name": "review_acquisition_mutex_wait_honors_deadline",
+      "exit_code": 0,
+      "seconds": 0.069
+    },
+    {
+      "name": "review_append_cannot_publish_after_lease_expires_during_upload",
+      "exit_code": 0,
+      "seconds": 0.077
+    },
+    {
+      "name": "review_cancelled_read_is_cancelled",
+      "exit_code": 0,
+      "seconds": 0.102
+    },
+    {
+      "name": "review_existing_v3_survives_later_v1_ref",
+      "exit_code": 0,
+      "seconds": 0.04
+    },
+    {
+      "name": "review_expired_read_is_deadline_exceeded",
+      "exit_code": 0,
+      "seconds": 0.02
+    },
+    {
+      "name": "review_foreign_manifest_is_not_replayed",
+      "exit_code": 0,
+      "seconds": 0.028
+    },
+    {
+      "name": "review_hung_idle_renewal_loses_by_lease_deadline",
+      "exit_code": 0,
+      "seconds": 1.522
+    },
+    {
+      "name": "review_idle_renewal_cannot_revive_expired_lease",
+      "exit_code": 0,
+      "seconds": 0.462
+    },
+    {
+      "name": "review_lost_session_cannot_finish_suspended_append",
+      "exit_code": 0,
+      "seconds": 0.144
+    },
+    {
+      "name": "review_lost_session_returns_while_upload_stays_blocked",
+      "exit_code": 0,
+      "seconds": 0.221
+    },
+    {
+      "name": "review_manifest_head_cannot_hide_catalog_events",
+      "exit_code": 0,
+      "seconds": 0.106
+    },
+    {
+      "name": "review_max_head_is_integrity_not_overflow",
+      "exit_code": 0,
+      "seconds": 0.035
+    },
+    {
+      "name": "review_missing_committed_target_is_not_empty_feed",
+      "exit_code": 0,
+      "seconds": 0.074
+    },
+    {
+      "name": "review_missing_target_after_release_cannot_reset_key",
+      "exit_code": 0,
+      "seconds": 0.154
+    },
+    {
+      "name": "review_missing_target_after_release_is_not_empty",
+      "exit_code": 0,
+      "seconds": 0.098
+    },
+    {
+      "name": "review_missing_target_cannot_reset_stable_identity",
+      "exit_code": 0,
+      "seconds": 0.034
+    },
+    {
+      "name": "review_old_target_cannot_hide_committed_key",
+      "exit_code": 0,
+      "seconds": 0.122
+    },
+    {
+      "name": "review_read_never_uses_unbounded_get",
+      "exit_code": 0,
+      "seconds": 0.079
+    },
+    {
+      "name": "review_real_clock_claim_retry_returns_exact_original_ref",
+      "exit_code": 0,
+      "seconds": 0.114
+    },
+    {
+      "name": "review_renewal_rechecks_clock_after_delayed_read",
+      "exit_code": 0,
+      "seconds": 0.221
+    },
+    {
+      "name": "review_takeover_preserves_read_before_next_append",
+      "exit_code": 0,
+      "seconds": 0.182
+    },
+    {
+      "name": "review_transient_catalog_read_recovers",
+      "exit_code": 0,
+      "seconds": 0.129
+    },
+    {
+      "name": "review_transient_manifest_read_recovers",
+      "exit_code": 0,
+      "seconds": 0.098
+    },
+    {
+      "name": "review_unacquired_close_completes",
+      "exit_code": 0,
+      "seconds": 0.147
+    },
+    {
+      "name": "review_v2_set_target_after_expired_lease_still_works",
+      "exit_code": 0,
+      "seconds": 0.122
+    }
+  ],
+  "test_source": "r2-closure-1698ecd.rs",
+  "test_source_sha256": "0c341c04cd9bc33f28ab013ec7d16c8f37d4892cdba9058f469f94735d9dcf03",
+  "method": "Fixed git archive, private cloned target, copied immutable executable; each exact test bounded to 8 seconds."
+}
