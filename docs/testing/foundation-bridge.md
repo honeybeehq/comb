@@ -4,9 +4,10 @@ The bridge is Comb's long-lived machine interface for Foundation and similar cli
 Foundation owns its documents and merge semantics. The bridge transports opaque bytes
 and delegates all durable publication, deduplication, and fencing to the shared Log.
 
-Implementation branch: `feat/foundation-r2-adapter`, based on `bff2edb`. The first transport is stdio JSONL,
-brokered by the Foundation host. A separate socket server is outside this slice.
-Shared Core and Log implementation proceeds on `feat/reliable-log-r1`.
+The implemented transport is stdio JSONL, brokered by the Foundation host. A separate
+socket server is outside this slice. The bridge delegates to the shared v3 complete-feed
+and publisher-session APIs. See the [accepted integration gate](../review/foundation-comb-integration-gate.md)
+for fixed-source backend and reconstruction evidence.
 
 ## Required contract
 
