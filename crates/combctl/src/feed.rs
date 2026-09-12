@@ -1084,7 +1084,9 @@ impl WriterSession {
         let _ = self.state.send(WriterState::Acquiring { held_until: None });
         let op = self.feed.store.mint_operation();
         let ttl = self.policy.ttl.as_secs().max(1) as i64;
-        let acquire_until = tokio::time::Instant::now() + self.policy.initial_acquire_budget;
+        let acquire_until = tokio::time::Instant::now()
+            .checked_add(self.policy.initial_acquire_budget)
+            .unwrap_or(call.deadline);
         let deadline = call.deadline.min(acquire_until);
         let acquire_call = CallContext {
             deadline,
@@ -1991,6 +1993,35 @@ mod tests {
         let mut policy = LeasePolicy::bridge_default();
         policy.renew_every = Duration::MAX;
         assert!(policy.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_acquire_budget_respects_caller_deadline() {
+        let feed = CompleteFeed::open(store(), "budget".into(), &call())
+            .await
+            .unwrap();
+        let policy = LeasePolicy {
+            initial_acquire_budget: Duration::MAX,
+            ..LeasePolicy::bridge_default()
+        };
+        let first = feed
+            .writer_session(WriterLabel::try_from("first").unwrap(), policy.clone())
+            .unwrap();
+        first.ready(&call()).await.unwrap();
+        let second = feed
+            .writer_session(WriterLabel::try_from("second").unwrap(), policy)
+            .unwrap();
+        let bounded_call = CallContext::new(
+            tokio::time::Instant::now() + Duration::from_millis(25),
+            CancellationToken::new(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(1), second.ready(&bounded_call))
+            .await
+            .expect("acquisition must remain bounded by the caller");
+        assert!(matches!(
+            result,
+            Err(LeaseError::DeadlineExceeded) | Err(LeaseError::LeaseHeld { .. })
+        ));
     }
 
     #[tokio::test]
