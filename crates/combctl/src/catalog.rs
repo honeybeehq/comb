@@ -102,11 +102,11 @@ fn validate_leaf_refs(refs: &[CatalogChunkRef]) -> Result<()> {
     if refs.is_empty() || refs.len() > MAX_CATALOG_ITEMS {
         return Err(CoreError::IntegrityError("catalog leaf width is invalid".into()).into());
     }
-    let mut prev_last = None;
+    let mut prev_last: Option<u64> = None;
     for r in refs {
         validate_ref(r)?;
         if let Some(prev) = prev_last {
-            if r.first_seq != prev + 1 {
+            if Some(r.first_seq) != prev.checked_add(1) {
                 return Err(CoreError::IntegrityError(
                     "catalog leaf ranges are gapped or overlapping".into(),
                 )
@@ -125,15 +125,19 @@ fn validate_children(children: &[CatalogChild], height: u8) -> Result<()> {
     if height == 0 || height > MAX_CATALOG_HEIGHT {
         return Err(CoreError::IntegrityError("catalog branch height is invalid".into()).into());
     }
-    let mut prev_last = None;
+    let mut prev_last: Option<u64> = None;
     for c in children {
-        if c.first_seq == 0 || c.last_seq < c.first_seq || c.chunk_count == 0 {
+        if c.first_seq == 0
+            || c.last_seq < c.first_seq
+            || c.chunk_count == 0
+            || c.chunk_count > c.last_seq - c.first_seq + 1
+        {
             return Err(
                 CoreError::IntegrityError("catalog child has an impossible range".into()).into(),
             );
         }
         if let Some(prev) = prev_last {
-            if c.first_seq != prev + 1 {
+            if Some(c.first_seq) != prev.checked_add(1) {
                 return Err(CoreError::IntegrityError(
                     "catalog child ranges are gapped or overlapping".into(),
                 )
@@ -625,6 +629,52 @@ mod tests {
             raw_payload_bytes: 1,
             plaintext_bytes: 8,
         }
+    }
+
+    #[test]
+    fn catalog_rejects_sequence_wrap_without_panicking() {
+        let s = store();
+        let digest = s.key.digest(b"chunk");
+        let refs = vec![tiny(u64::MAX, &digest), tiny(1, &digest)];
+        assert!(matches!(
+            validate_leaf_refs(&refs)
+                .unwrap_err()
+                .downcast_ref::<CoreError>(),
+            Some(CoreError::IntegrityError(_))
+        ));
+        let children: Vec<_> = refs
+            .iter()
+            .map(|r| CatalogChild {
+                first_seq: r.first_seq,
+                last_seq: r.last_seq,
+                chunk_count: 1,
+                digest: r.digest.clone(),
+            })
+            .collect();
+        assert!(matches!(
+            validate_children(&children, 1)
+                .unwrap_err()
+                .downcast_ref::<CoreError>(),
+            Some(CoreError::IntegrityError(_))
+        ));
+    }
+
+    #[test]
+    fn catalog_rejects_more_chunks_than_events() {
+        let s = store();
+        let digest = s.key.digest(b"chunk");
+        let children = vec![CatalogChild {
+            first_seq: 1,
+            last_seq: 1,
+            chunk_count: u64::MAX,
+            digest,
+        }];
+        assert!(matches!(
+            validate_children(&children, 1)
+                .unwrap_err()
+                .downcast_ref::<CoreError>(),
+            Some(CoreError::IntegrityError(_))
+        ));
     }
 
     #[tokio::test]
