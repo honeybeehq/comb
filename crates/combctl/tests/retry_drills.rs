@@ -898,3 +898,68 @@ async fn missing_log_manifest_is_not_permission_to_overwrite() {
     assert_eq!(still.generation, head.generation);
     assert_eq!(still.target.as_ref(), Some(&target));
 }
+
+#[tokio::test]
+async fn trim_retry_recovers_original_result_after_lost_reply() {
+    let mem = Arc::new(MemoryBackend::new());
+    let healthy = store_on(mem.clone());
+    let log = LogStore::new(&healthy, "trim-retry");
+    log.append(healthy.mint_operation(), "w", &evs(&["one", "two"]), 60)
+        .await
+        .unwrap();
+    let op = healthy.mint_operation();
+    let unlucky = store_on(Arc::new(FailpointBackend::drop_next_put_update_response(
+        mem.clone(),
+        "/refs/",
+    )));
+    LogStore::new(&unlucky, "trim-retry")
+        .trim_before(op, 1)
+        .await
+        .unwrap_err();
+    let generation = log.head().await.unwrap().generation;
+    assert_eq!(log.trim_before(op, 1).await.unwrap(), 1);
+    assert_eq!(log.head().await.unwrap().generation, generation);
+    assert_eq!(log.read(2).await.unwrap()[0].payload, b"two");
+    wipe_intent(mem.as_ref(), op).await;
+    log.trim_before(healthy.mint_operation(), 2).await.unwrap();
+    let later_generation = log.head().await.unwrap().generation;
+    assert_eq!(log.trim_before(op, 1).await.unwrap(), 1);
+    assert_eq!(log.head().await.unwrap().generation, later_generation);
+}
+
+#[tokio::test]
+async fn compact_retry_recovers_original_result_after_lost_reply() {
+    let mem = Arc::new(MemoryBackend::new());
+    let healthy = store_on(mem.clone());
+    let log = LogStore::new(&healthy, "compact-retry");
+    for payload in ["one", "two"] {
+        log.append(healthy.mint_operation(), "w", &evs(&[payload]), 60)
+            .await
+            .unwrap();
+    }
+    let op = healthy.mint_operation();
+    let unlucky = store_on(Arc::new(FailpointBackend::drop_next_put_update_response(
+        mem.clone(),
+        "/refs/",
+    )));
+    LogStore::new(&unlucky, "compact-retry")
+        .compact(op)
+        .await
+        .unwrap_err();
+    let generation = log.head().await.unwrap().generation;
+    assert_eq!(log.compact(op).await.unwrap(), 2);
+    assert_eq!(log.head().await.unwrap().generation, generation);
+    assert_eq!(log.read(1).await.unwrap().len(), 2);
+    wipe_intent(mem.as_ref(), op).await;
+    log.append(healthy.mint_operation(), "w", &evs(&["three"]), 60)
+        .await
+        .unwrap();
+    let later_generation = log.head().await.unwrap().generation;
+    assert_eq!(log.compact(op).await.unwrap(), 2);
+    assert_eq!(log.head().await.unwrap().generation, later_generation);
+    let noop = healthy.mint_operation();
+    let objects_before = mem.list("").await.unwrap().len();
+    assert_eq!(log.compact(noop).await.unwrap(), 0);
+    assert_eq!(mem.list("").await.unwrap().len(), objects_before);
+    assert!(!mem.exists(&intent_key(noop)).await.unwrap());
+}

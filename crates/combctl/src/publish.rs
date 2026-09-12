@@ -298,6 +298,26 @@ impl Store {
         }
     }
 
+    /// Recover a completed request without creating an intent or publishing.
+    /// Maintenance callers use this before returning a fresh no-op result.
+    pub(crate) async fn recover_completed<P: RefMutationPlan>(
+        &self,
+        identity: &OpIdentity,
+        plan: &P,
+    ) -> Result<Option<Published<P::Outcome>>> {
+        let request = plan
+            .material()
+            .hash(&self.key, &self.tenant, plan.resource());
+        let loaded = self.load_intent(identity).await?;
+        identity.check_time(self.clock().now(), &self.policy(), loaded.is_some())?;
+        if let Some((intent, _)) = loaded {
+            intent.validate()?;
+            self.check_intent(&intent, identity, plan.resource(), &request)?;
+        }
+        self.recover_without_intent(identity, &request, plan.resource())
+            .await
+    }
+
     pub(crate) async fn publish<P: RefMutationPlan>(
         &self,
         identity: OpIdentity,

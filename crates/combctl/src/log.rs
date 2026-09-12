@@ -310,20 +310,22 @@ impl<'a> LogStore<'a> {
             Some(s) => s,
         };
         let domain = self.load_domain(&snapshot.value).await?;
+        let plan = CompactPlan {
+            resource: self.name.clone(),
+            logical: self.logical.clone(),
+            feed: self.feed,
+        };
+        let identity = OpIdentity::Generic(op);
         if domain.chunks.len() < 2 {
-            return Ok(0);
+            // A prior compaction may itself have emptied the chunk list.
+            // Recover it before treating this request as a fresh no-op.
+            return Ok(self
+                .store
+                .recover_completed(&identity, &plan)
+                .await?
+                .map_or(0, |published| published.outcome));
         }
-        let published = self
-            .store
-            .publish(
-                OpIdentity::Generic(op),
-                CompactPlan {
-                    resource: self.name.clone(),
-                    logical: self.logical.clone(),
-                    feed: self.feed,
-                },
-            )
-            .await?;
+        let published = self.store.publish(identity, plan).await?;
         Ok(published.outcome)
     }
 
@@ -1078,6 +1080,11 @@ impl RefMutationPlan for CompactPlan {
         let mut next = current.clone();
         next.generation = ctx.generation;
         next.updated_at = ctx.now;
+        manifest.result = serde_json::to_value(merged)?;
+        let mut ref_state = next.clone();
+        ref_state.head_commit = None;
+        ref_state.target = None;
+        manifest.ref_state = Some(ref_state);
         Ok(PreparedMutation {
             next,
             uploads: vec![
@@ -1141,6 +1148,11 @@ impl RefMutationPlan for TrimPlan {
         let mut next = current.clone();
         next.generation = ctx.generation;
         next.updated_at = ctx.now;
+        manifest.result = serde_json::to_value(floor)?;
+        let mut ref_state = next.clone();
+        ref_state.head_commit = None;
+        ref_state.target = None;
+        manifest.ref_state = Some(ref_state);
         let _ = &self.logical;
         Ok(PreparedMutation {
             next,
