@@ -1352,17 +1352,6 @@ impl Store {
             ))
             .into());
         }
-        if self.layout == KeyLayout::V3
-            && schema == LOG_MANIFEST_SCHEMA_V3
-            && payload.len() as u64 > MAX_MANIFEST_OBJECT_BYTES
-        {
-            return Err(CoreError::ObjectTooLarge {
-                key: self.object_key(digest),
-                limit: MAX_MANIFEST_OBJECT_BYTES,
-                actual: Some(payload.len() as u64),
-            }
-            .into());
-        }
         let header_v = value.get("header").cloned().ok_or_else(|| {
             CoreError::RecoveryFailed(format!("manifest {digest} has no commit header"))
         })?;
