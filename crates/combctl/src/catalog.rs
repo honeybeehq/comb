@@ -70,6 +70,17 @@ enum CatalogNode {
     },
 }
 
+impl CatalogNode {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Leaf { refs, .. } => validate_leaf_refs(refs),
+            Self::Branch {
+                height, children, ..
+            } => validate_children(children, *height),
+        }
+    }
+}
+
 const CATALOG_SCHEMAS: &[&str] = &[CATALOG_NODE_SCHEMA];
 
 fn spec(tenant: &str) -> EnvelopeReadSpec<'_> {
@@ -166,12 +177,7 @@ fn map_catalog_read_error(digest: &Digest, e: anyhow::Error) -> anyhow::Error {
 }
 
 async fn put_node(store: &Store, node: &CatalogNode) -> Result<Digest> {
-    match node {
-        CatalogNode::Leaf { refs, .. } => validate_leaf_refs(refs)?,
-        CatalogNode::Branch {
-            height, children, ..
-        } => validate_children(children, *height)?,
-    }
+    node.validate()?;
     let payload = serde_json::to_vec(node)?;
     store
         .put_object(
@@ -191,24 +197,7 @@ async fn load_node(store: &Store, digest: &Digest) -> Result<CatalogNode> {
     let node: CatalogNode = serde_json::from_slice(&payload).map_err(|e| {
         CoreError::IntegrityError(format!("catalog node {digest} is malformed: {e}"))
     })?;
-    match &node {
-        CatalogNode::Leaf { schema, refs } => {
-            if !matches!(schema, CatalogSchemaV1::V1) {
-                return Err(CoreError::IntegrityError("catalog leaf schema".into()).into());
-            }
-            validate_leaf_refs(refs)?;
-        }
-        CatalogNode::Branch {
-            schema,
-            height,
-            children,
-        } => {
-            if !matches!(schema, CatalogSchemaV1::V1) {
-                return Err(CoreError::IntegrityError("catalog branch schema".into()).into());
-            }
-            validate_children(children, *height)?;
-        }
-    }
+    node.validate()?;
     Ok(node)
 }
 
@@ -628,6 +617,43 @@ mod tests {
             event_count: 1,
             raw_payload_bytes: 1,
             plaintext_bytes: 8,
+        }
+    }
+
+    #[tokio::test]
+    async fn loaded_catalog_rejects_invalid_body_and_schema() {
+        let store = store();
+        let valid = serde_json::json!({
+            "kind": "leaf", "schema": CATALOG_NODE_SCHEMA,
+            "refs": [tiny(1, &store.key.digest(b"chunk"))],
+        });
+        let mut unknown_schema = valid.clone();
+        unknown_schema["schema"] = serde_json::json!("unknown");
+        let mut extra_field = valid;
+        extra_field["extra"] = serde_json::json!(true);
+        for value in [
+            serde_json::json!({"kind": "leaf", "schema": CATALOG_NODE_SCHEMA, "refs": []}),
+            unknown_schema,
+            serde_json::json!({"kind": "branch", "schema": CATALOG_NODE_SCHEMA, "height": 0, "children": []}),
+            extra_field,
+        ] {
+            let digest = store
+                .put_object(
+                    ObjectKind::Blob,
+                    CATALOG_NODE_SCHEMA,
+                    serde_json::to_vec(&value).unwrap(),
+                    NonZeroU64::new(MAX_CATALOG_NODE_OBJECT_BYTES).unwrap(),
+                )
+                .await
+                .unwrap();
+            let error = load_node(&store, &digest).await.unwrap_err();
+            assert!(
+                matches!(
+                    error.downcast_ref::<CoreError>(),
+                    Some(CoreError::IntegrityError(_))
+                ),
+                "{error:#}"
+            );
         }
     }
 
