@@ -237,7 +237,10 @@ impl LeasePolicy {
     }
 
     fn validate(self) -> Result<Self, InvalidLeasePolicy> {
-        if self.renew_every + self.clock_slack >= self.ttl
+        if self
+            .renew_every
+            .checked_add(self.clock_slack)
+            .is_none_or(|renew_window| renew_window >= self.ttl)
             || self.ttl > Duration::from_secs(600)
             || self.initial_acquire_budget < self.ttl
         {
@@ -1981,6 +1984,13 @@ mod tests {
             DigestKey::from_bytes([9u8; 32]),
             None,
         ))
+    }
+
+    #[test]
+    fn overflowing_lease_policy_is_rejected() {
+        let mut policy = LeasePolicy::bridge_default();
+        policy.renew_every = Duration::MAX;
+        assert!(policy.validate().is_err());
     }
 
     #[tokio::test]
