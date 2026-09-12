@@ -294,10 +294,8 @@ impl<'a> LogStore<'a> {
                 OpIdentity::Generic(op),
                 TakeoverPlan {
                     resource: self.name.clone(),
-                    logical: self.logical.clone(),
                     writer: writer.to_string(),
                     lease_secs,
-                    feed: self.feed,
                 },
             )
             .await?;
@@ -312,7 +310,6 @@ impl<'a> LogStore<'a> {
         let domain = self.load_domain(&snapshot.value).await?;
         let plan = CompactPlan {
             resource: self.name.clone(),
-            logical: self.logical.clone(),
             feed: self.feed,
         };
         let identity = OpIdentity::Generic(op);
@@ -342,7 +339,6 @@ impl<'a> LogStore<'a> {
                 OpIdentity::Generic(op),
                 TrimPlan {
                     resource: self.name.clone(),
-                    logical: self.logical.clone(),
                     before: seq,
                 },
             )
@@ -956,10 +952,8 @@ impl RefMutationPlan for StableAppendPlan {
 
 struct TakeoverPlan {
     resource: String,
-    logical: String,
     writer: String,
     lease_secs: i64,
-    feed: FeedMode,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -997,8 +991,6 @@ impl RefMutationPlan for TakeoverPlan {
             lease_until: now + Duration::seconds(self.lease_secs),
         });
         next.updated_at = now;
-        let _ = &self.logical;
-        let _ = self.feed;
         Ok(PreparedMutation {
             next,
             uploads: Vec::new(),
@@ -1014,7 +1006,6 @@ impl RefMutationPlan for TakeoverPlan {
 
 struct CompactPlan {
     resource: String,
-    logical: String,
     feed: FeedMode,
 }
 
@@ -1076,7 +1067,6 @@ impl RefMutationPlan for CompactPlan {
         if self.feed == FeedMode::Complete {
             manifest.retention = RetentionMode::Complete;
         }
-        let _ = &self.logical;
         let mut next = current.clone();
         next.generation = ctx.generation;
         next.updated_at = ctx.now;
@@ -1111,7 +1101,6 @@ impl RefMutationPlan for CompactPlan {
 
 struct TrimPlan {
     resource: String,
-    logical: String,
     before: u64,
 }
 
@@ -1153,7 +1142,6 @@ impl RefMutationPlan for TrimPlan {
         ref_state.head_commit = None;
         ref_state.target = None;
         manifest.ref_state = Some(ref_state);
-        let _ = &self.logical;
         Ok(PreparedMutation {
             next,
             uploads: vec![Upload {
