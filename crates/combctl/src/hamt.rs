@@ -197,16 +197,7 @@ pub async fn insert(
         .path_digest(&store.key, &store.tenant, logical_log);
     let root_node = load_node(store, &root.digest, logical_log, &path, 0, Some(head)).await?;
     check_root_shape(root, &root_node, &root.digest)?;
-    let new_digest = insert_at(
-        store,
-        Some(&root.digest),
-        &entry,
-        &path,
-        logical_log,
-        0,
-        head,
-    )
-    .await?;
+    let new_digest = insert_at(store, root_node, &entry, &path, logical_log, 0, head).await?;
     let entries = root
         .entries
         .checked_add(1)
@@ -216,7 +207,7 @@ pub async fn insert(
 
 async fn insert_at(
     store: &Store,
-    current: Option<&Digest>,
+    node: HamtNode,
     entry: &StableIndexEntry,
     path: &Digest,
     logical_log: &str,
@@ -226,10 +217,6 @@ async fn insert_at(
     if depth > MAX_LEAF_DEPTH {
         return Err(CoreError::Rejected("stable key path hash collision".into()).into());
     }
-    let node = match current {
-        Some(d) => load_node(store, d, logical_log, path, depth, Some(head)).await?,
-        None => branch_node(depth, path, Vec::new())?,
-    };
     match node {
         HamtNode::Leaf {
             key: existing,
@@ -273,9 +260,11 @@ async fn insert_at(
                     put_node(store, &branch_node(depth, path, children)?).await
                 }
                 Some(next) => {
+                    let node =
+                        load_node(store, &next, logical_log, path, depth + 1, Some(head)).await?;
                     let updated = Box::pin(insert_at(
                         store,
-                        Some(&next),
+                        node,
                         entry,
                         path,
                         logical_log,
@@ -437,12 +426,6 @@ async fn load_node(
         Ok(v) => v,
         Err(e) => return Err(map_node_read_error(digest, e)),
     };
-    if payload.len() > MAX_NODE_BYTES {
-        return Err(CoreError::IntegrityError(format!(
-            "stable index node {digest} exceeds {MAX_NODE_BYTES} bytes"
-        ))
-        .into());
-    }
     let node: HamtNode = serde_json::from_slice(&payload).map_err(|e| {
         CoreError::IntegrityError(format!("stable index node {digest} is malformed: {e}"))
     })?;
@@ -692,6 +675,66 @@ mod tests {
             last,
             generation,
         }
+    }
+
+    #[tokio::test]
+    async fn plaintext_cap_rejects_node_below_encoded_cap() {
+        let store = store();
+        let e = entry(&store, "cap", 1, 1, 1);
+        let mut payload = serde_json::to_vec(&leaf_node(&e)).unwrap();
+        payload.resize(MAX_NODE_BYTES + 1, b' ');
+        let (digest, _) = store.put_blob(payload).await.unwrap();
+        let (encoded, _) = store.backend.get(&store.object_key(&digest)).await.unwrap();
+        assert!((encoded.len() as u64) < MAX_STABLE_INDEX_NODE_OBJECT_BYTES);
+        let error = lookup(
+            &store,
+            &StableIndexRoot::new(digest, 1),
+            &e.key,
+            "feed",
+            IndexHead {
+                generation: 1,
+                head_seq: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<CoreError>(),
+                Some(CoreError::IntegrityError(_))
+            ),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn insertion_read_cost_and_root_immutability() {
+        use comb_object::failpoint::CountingBackend;
+        let backend = Arc::new(CountingBackend::new(Arc::new(MemoryBackend::new())));
+        let store = Store::new(
+            backend.clone(),
+            "org_t",
+            DigestKey::from_bytes([4; 32]),
+            None,
+        );
+        let root = empty_root(&store).await.unwrap();
+        let e = entry(&store, "cost", 1, 1, 1);
+        let before = backend.get_count();
+        let next = insert(&store, &root, e.clone(), "feed", head(1))
+            .await
+            .unwrap();
+        let reads = backend.get_count() - before;
+        println!("HAMT insertion reads: {reads}");
+        assert!(reads <= 2, "one bounded root traversal");
+        assert!(matches!(
+            lookup(&store, &root, &e.key, "feed", head(1))
+                .await
+                .unwrap(),
+            Lookup::Absent
+        ));
+        assert!(
+            matches!(lookup(&store, &next, &e.key, "feed", head(1)).await.unwrap(), Lookup::Found(got) if got.first == 1 && got.payload_hash == e.payload_hash)
+        );
     }
 
     #[test]
