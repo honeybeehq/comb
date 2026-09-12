@@ -71,10 +71,10 @@ where
                     .map_err(|_| anyhow::anyhow!("bridge output closed"))?;
                 }
                 FrameRead::Line(bytes) => {
-                    let id = peek_id(&bytes, &bridge.limits);
                     let permit = match sem.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
+                            let id = peek_id(&bytes, &bridge.limits);
                             tx.send(Response::busy(id).to_jsonl())
                                 .await
                                 .map_err(|_| anyhow::anyhow!("bridge output closed"))?;
@@ -270,6 +270,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn framing_preserves_boundaries_across_reader_capacities() {
+        let cases: &[(&[u8], usize, &[Option<&[u8]>])] = &[
+            (b"", 1, &[]),
+            (b"x\n", 1, &[Some(b"x")]),
+            (b"x\r\n", 2, &[Some(b"x")]),
+            (b"x\r", 2, &[Some(b"x")]),
+            (b"x\r\n", 1, &[None]),
+            (b"x\r", 1, &[None]),
+            (b"\n\nz", 1, &[Some(b""), Some(b""), Some(b"z")]),
+            (b"abc\nx\n", 2, &[None, Some(b"x")]),
+        ];
+        for capacity in [1, 2, 3, 7, 8192] {
+            for &(input, limit, expected) in cases {
+                let mut reader = BufReader::with_capacity(capacity, input);
+                for wanted in expected {
+                    match (read_jsonl_frame(&mut reader, limit).await.unwrap(), wanted) {
+                        (FrameRead::Line(actual), Some(wanted)) => assert_eq!(&actual, wanted),
+                        (FrameRead::Oversized { id }, None) => assert!(id.is_empty()),
+                        (actual, wanted) => {
+                            panic!("capacity={capacity} limit={limit}: {actual:?} != {wanted:?}")
+                        }
+                    }
+                }
+                assert!(matches!(
+                    read_jsonl_frame(&mut reader, limit).await.unwrap(),
+                    FrameRead::Eof
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn drain_stops_at_newline_and_keeps_next_frame() {
         let mut data = Vec::from(&b"{\"v\":1,\"id\":\"big\",\"op\":\"hello\",\"pad\":\""[..]);
         data.extend(std::iter::repeat(b'a').take(80));
@@ -285,6 +317,57 @@ mod tests {
         match read_jsonl_frame(&mut reader, 1024).await.unwrap() {
             FrameRead::Line(line) => assert_eq!(line, br#"{"v":1,"id":"h","op":"hello"}"#),
             other => panic!("expected hello line, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn saturated_admission_preserves_valid_and_invalid_request_ids() {
+        use comb_core::DigestKey;
+        use comb_object::memory::MemoryBackend;
+        use combctl::store::Store;
+        use tokio::io::AsyncReadExt;
+
+        let limits = super::super::limits::Limits {
+            max_concurrent_requests: 1,
+            ..Default::default()
+        };
+        let bridge = Arc::new(
+            Bridge::new(
+                Store::new(
+                    Arc::new(MemoryBackend::new()),
+                    "org_t",
+                    DigestKey::from_bytes([5; 32]),
+                    None,
+                ),
+                "comb-bridge".into(),
+                60,
+                limits,
+            )
+            .unwrap(),
+        );
+        // All frames are ready on this single-thread runtime before the spawned
+        // first handler is polled, so the remaining frames see occupied admission.
+        let input: &'static [u8] = b"{\"v\":1,\"id\":\"first\",\"op\":\"hello\"}\n{\"v\":1,\"id\":\"next\",\"op\":\"hello\"}\n{\"v\":1,\"id\":\"bad-op\",\"op\":\"unknown\"}\n{broken\n";
+        let (mut reader, writer) = tokio::io::duplex(8192);
+        let server = tokio::spawn(run(input, writer, bridge));
+        let mut output = String::new();
+        timeout(Duration::from_secs(3), reader.read_to_string(&mut output))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap().unwrap();
+        let frames: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(
+            frames.iter().find(|v| v["id"] == "first").unwrap()["ok"],
+            true
+        );
+        for id in ["next", "bad-op", ""] {
+            let frame = frames.iter().find(|v| v["id"] == id).unwrap();
+            assert_eq!(frame["ok"], false);
+            assert_eq!(frame["error"]["code"], "busy");
         }
     }
 }
