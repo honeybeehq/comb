@@ -44,7 +44,7 @@ Borrowed framing buffers were rejected after an optimized paired oversized-frame
 
 ## Final verification
 
-`cargo +1.93.0 test --locked --offline --workspace --all-targets`: 216 framework-reported passes, zero failures, zero ignored across 15 test targets on the source before the final singleton-slice borrowing change. After that one-line delta, all 37 affected log/retry/phase-C tests, workspace clippy and build were rerun successfully; the unrelated full suite was not repeated, per coordinator instruction. Two opt-in tests returned early without provider configuration; these are not live-backend successes. A separate pre-delta run explicitly enabled the local backend drill and passed; all 24 Node tests and the four syntax checks also passed on that pre-delta source.
+`cargo +1.93.0 test --locked --offline --workspace --all-targets`: 216 framework-reported passes, zero failures, zero ignored across 15 test targets on the source before the final singleton-slice borrowing change. After that one-line delta, all 37 affected log/retry/phase-C tests, workspace clippy and build were rerun successfully; the unrelated full suite was not repeated. Two opt-in tests returned early without provider configuration; these are not live-backend successes. A separate pre-delta run explicitly enabled the local backend drill and passed; all 24 Node tests and the four syntax checks also passed on that pre-delta source.
 
 All commands below exited zero on macOS arm64. Node was the installed v22.13.0 binary, matching the CI major version. Rust CI uses the same workspace test/clippy targets; `--offline` prevented dependency downloads here.
 
