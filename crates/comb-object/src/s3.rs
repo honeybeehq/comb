@@ -92,17 +92,7 @@ impl S3Backend {
 #[async_trait]
 impl ObjectBackend for S3Backend {
     async fn put_create(&self, key: &str, body: &[u8]) -> Result<Version> {
-        let out = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(self.full_key(key))
-            .if_none_match("*")
-            .body(ByteStream::from(body.to_vec()))
-            .send()
-            .await
-            .map_err(|e| Self::map_put_err(key, &e, true))?;
-        Ok(Version(out.e_tag().unwrap_or_default().to_string()))
+        self.put_update(key, None, body).await
     }
 
     async fn put_update(
@@ -251,5 +241,107 @@ impl ObjectBackend for S3Backend {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn conditional_put_wire_contract() {
+        for mode in 0..3 {
+            let creating = mode != 2;
+            for status in [200, 412, 404, 500] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let (headers, body) = loop {
+                        let mut buf = [0; 1024];
+                        let n = stream.read(&mut buf).await.unwrap();
+                        assert!(n > 0, "request ended prematurely");
+                        raw.extend_from_slice(&buf[..n]);
+                        assert!(raw.len() < 16 * 1024);
+                        if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8(raw[..end].to_vec()).unwrap();
+                            let len: usize = headers
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .map(str::parse)
+                                })
+                                .unwrap()
+                                .unwrap();
+                            if raw.len() >= end + 4 + len {
+                                break (headers, raw[end + 4..end + 4 + len].to_vec());
+                            }
+                        }
+                    };
+                    let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nETag: \"wire-version\"\r\nConnection: close\r\n\r\n");
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    (headers, body)
+                });
+                let config = aws_sdk_s3::config::Builder::new()
+                    .behavior_version(BehaviorVersion::latest())
+                    .region(Region::new("us-east-1"))
+                    .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                    .endpoint_url(endpoint)
+                    .force_path_style(true)
+                    .retry_config(
+                        aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1),
+                    )
+                    .build();
+                let backend = S3Backend {
+                    client: Client::from_conf(config),
+                    bucket: "bucket".into(),
+                    prefix: "prefix".into(),
+                };
+                let payload = b"\x00payload\xff";
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    if mode == 0 {
+                        backend.put_create("nested/key", payload).await
+                    } else if mode == 1 {
+                        backend.put_update("nested/key", None, payload).await
+                    } else {
+                        backend
+                            .put_update("nested/key", Some(&Version("old-version".into())), payload)
+                            .await
+                    }
+                })
+                .await
+                .unwrap();
+                let (headers, body) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(
+                    headers.starts_with("PUT /bucket/prefix/nested/key?x-id=PutObject "),
+                    "{}",
+                    headers.lines().next().unwrap()
+                );
+                let lower = headers.to_ascii_lowercase();
+                if creating {
+                    assert!(lower.contains("\r\nif-none-match: *"));
+                    assert!(!lower.contains("\r\nif-match:"));
+                } else {
+                    assert!(lower.contains("\r\nif-match: old-version"));
+                    assert!(!lower.contains("\r\nif-none-match:"));
+                }
+                assert_eq!(body, payload);
+                match status {
+                    200 => assert_eq!(result.unwrap().0, "\"wire-version\""),
+                    412 if creating => assert!(matches!(result, Err(CoreError::AlreadyExists(_)))),
+                    412 | 404 => assert!(matches!(result, Err(CoreError::PreconditionFailed(_)))),
+                    500 => assert!(matches!(result, Err(CoreError::BackendUnavailable(_)))),
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 }
