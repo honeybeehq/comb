@@ -779,7 +779,7 @@ async fn prepare_events(
         None
     };
     for s in stables {
-        check_payloads(&[s.payload.clone()])?;
+        check_payloads(std::slice::from_ref(&s.payload))?;
         let first = seq
             .checked_add(1)
             .ok_or_else(|| CoreError::Rejected("sequence overflow".into()))?;
