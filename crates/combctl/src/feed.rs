@@ -2005,7 +2005,7 @@ mod tests {
             ..LeasePolicy::bridge_default()
         };
         let first = feed
-            .writer_session(WriterLabel::try_from("first").unwrap(), policy.clone())
+            .writer_session(WriterLabel::try_from("first").unwrap(), policy)
             .unwrap();
         first.ready(&call()).await.unwrap();
         let second = feed

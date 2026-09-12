@@ -574,4 +574,31 @@ mod tests {
             a.hash(&key, "org", "log/other/p0")
         );
     }
+    #[test]
+    fn material_preserves_stable_precondition_order_and_payload_order() {
+        let key = DigestKey::from_bytes([3; 32]);
+        let input = Material {
+            kind: "append".into(),
+            preconditions: vec![
+                ("z".into(), vec![0]),
+                ("a".into(), vec![2]),
+                ("a".into(), vec![1]),
+            ],
+            payload: vec![vec![0], vec![255]],
+        };
+        let mut sorted = input.clone();
+        sorted.preconditions.rotate_left(1);
+        let expected = input.hash(&key, "org", "feed");
+        assert_eq!(expected, sorted.hash(&key, "org", "feed"));
+        assert_eq!(input.preconditions[0].0, "z");
+        sorted.preconditions.swap(0, 1);
+        assert_ne!(expected, sorted.hash(&key, "org", "feed"));
+        let mut reversed = input.clone();
+        reversed.payload.reverse();
+        assert_ne!(expected, reversed.hash(&key, "org", "feed"));
+        assert_eq!(
+            expected.to_string(),
+            "b3k:b4f548dca9db65dc973a0025102dbc04aca44f7c073c1884edf1a02bf5abb984"
+        );
+    }
 }
