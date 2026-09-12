@@ -87,6 +87,9 @@ impl ObjectBackend for LocalBackend {
         expected: Option<&Version>,
         body: &[u8],
     ) -> Result<Version> {
+        let Some(expected) = expected else {
+            return self.put_create(key, body).await;
+        };
         let path = self.path_for(key)?;
         let dir = path.parent().expect("key has parent").to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -108,15 +111,13 @@ impl ObjectBackend for LocalBackend {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        match (&live, expected) {
-            (None, None) => {}
-            (Some(_), None) => return Err(CoreError::AlreadyExists(key.into())),
-            (None, Some(_)) => return Err(CoreError::PreconditionFailed(format!("{key}: gone"))),
-            (Some(l), Some(e)) if l == e => {}
-            (Some(l), Some(e)) => {
+        match live {
+            None => return Err(CoreError::PreconditionFailed(format!("{key}: gone"))),
+            Some(ref live) if live == expected => {}
+            Some(live) => {
                 return Err(CoreError::PreconditionFailed(format!(
                     "{key}: expected version {}, live {}",
-                    e.0, l.0
+                    expected.0, live.0
                 )))
             }
         }
@@ -221,6 +222,63 @@ impl ObjectBackend for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mixed_create_paths_have_one_winner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::new(dir.path()));
+        let completed = Arc::new(AtomicBool::new(false));
+        let writer = backend.clone();
+        let writer_done = completed.clone();
+        // Observe the temporary write, after conditional creation checked for
+        // absence but before publication. A large body gives the competing
+        // create time to publish; no sleep decides the ordering.
+        let worker = std::thread::spawn(move || {
+            let body = vec![7u8; 32 * 1024 * 1024];
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(writer.put_update("mixed", None, &body));
+            writer_done.store(true, Ordering::Release);
+            result
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let observed_temp = loop {
+            let temp_exists = fs::read_dir(dir.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp-")
+            });
+            if temp_exists {
+                break true;
+            }
+            if completed.load(Ordering::Acquire) || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+        let competing = backend.put_create("mixed", b"competing create").await;
+        let original = worker.join().unwrap();
+        eprintln!("competing create observed temporary write: {observed_temp}");
+        let successes = usize::from(original.is_ok()) + usize::from(competing.is_ok());
+        assert_eq!(
+            successes, 1,
+            "both create paths must share atomic create-only semantics"
+        );
+        let losing = if original.is_err() {
+            original
+        } else {
+            competing
+        };
+        assert!(matches!(losing, Err(CoreError::AlreadyExists(_))));
+    }
 
     #[tokio::test]
     async fn create_only_and_cas() {
